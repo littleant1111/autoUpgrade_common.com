@@ -1,0 +1,100 @@
+#!/usr/bin/expect
+
+###############   sftp copy file from remote host to local host ######
+set timeout 120
+set username            [lindex $argv 0]        
+set remoteHostIP        [lindex $argv 1]  
+set password            [lindex $argv 2]
+set remoteFile          [lindex $argv 3]
+set localFile           [lindex $argv 4]
+set flag                [lindex $argv 5]
+set ERR_TIMEOUT 3
+set PARA_ERROR 4
+set FILE_NOT_FOUND 5
+set No_such_file_or_directory 6
+
+###  command interact   ####
+if {$flag == "getFile"} {
+###  command interact   ####
+spawn sftp ${remoteHostIP}
+    expect  {
+        "yes/no"
+        {
+            send "yes\r"
+            expect {
+                "password:" 
+                { 
+                    send "$password\r"
+                }
+            }
+        }
+        "password:" 
+        {
+            send "$password\r"
+            expect {
+            "sftp>" 
+                {
+                send "get ${remoteFile} ${localFile}\r"
+                expect {
+                    "100%" 
+                    { 
+                        send "exit\r"
+                    }
+                    "not found"
+                    {
+                        exit $FILE_NOT_FOUND
+                    }
+                }
+            }
+            }
+        }
+        timeout {
+            exit $ERR_TIMEOUT
+        }
+    }
+expect eof
+} elseif {$flag == "putFile"} {
+spawn sftp ${remoteHostIP}
+    expect  {
+        "yes/no"
+        {
+            send "yes\r"
+            expect {
+                "password:" 
+                { 
+                    send "$password\r"
+                }
+            }
+        }
+        "password:" 
+        {
+            send "$password\r"
+            expect {
+            "sftp>" 
+                {
+                send "put ${localFile} ${remoteFile}\r"
+                expect {
+                    "100%" 
+                    { 
+                        send "exit\r"
+                    }
+                    "No such file or directory"
+                    {
+                        exit $No_such_file_or_directory
+                    }
+                }
+            }
+            }
+        }
+        timeout {
+            exit $ERR_TIMEOUT
+        }
+    }
+expect eof
+} else {
+    exit $PARA_ERROR
+}    
+
+
+
+

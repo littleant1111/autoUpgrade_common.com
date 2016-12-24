@@ -1,0 +1,2590 @@
+### pub.lib   ############
+
+
+####  日志输出  ########
+log_echo()
+{
+    echo "[ `date "+%Y-%m-%d %H:%M:%S"` ]" $* | tee -a ${LOG_FILE}
+}
+
+######  从数据库表中获取到数据到对应文件中  ########
+execSqlToFile()
+{
+    typeset func=execSqlToFile
+    if [ $# -ne 3 ];then
+        log_echo "error" "${func}" "Parameter error , usage : ${func}  [ IN db.conf ]    [ IN  a.sql ]  [OUT configfile]"
+        return 1
+    fi
+    typeset dbconfigfile="$1"
+    typeset theSqlFile="$2"
+    typeset theConfigFile="$3"
+    mkdir -p $(dirname ${theConfigFile}) 
+    if [ $? -ne 0 ];then
+        log_echo "error" "${func}" "Command is error ,CMD = [      mkdir -p $(dirname ${theConfigFile})     ]  "
+        return 1
+    fi
+    checkFilesExists  "${dbconfigfile}"  "${theSqlFile}"  ||  return 1
+    . ${dbconfigfile}
+    mysql -u${dbuser} -p${dbpassword} -h${dbhost} -e "use ${dbdatabase};source ${theSqlFile};" > ${theConfigFile} 2>${theConfigFile}.tmp
+    if [ $? -ne 0 ];then
+        log_echo "error" "${func}" "Command failed . may be can not connect to database or other error ,more info in file :   ${theConfigFile}.tmp   "
+        return 1
+    fi
+    #grep -v '^replace(' ${theConfigFile}.tmp | sort -u  | uniq > ${theConfigFile}
+    sed -i '1d' ${theConfigFile}
+    log_echo "info" "${func}" "Exit  ${func} with succesed."    
+    return 0
+}
+
+###### 检查数据库配置文件是否正确  ####
+checkDbConfigFile()
+{
+    typeset func=checkDbConfigFile
+    if [ $# -ne 1 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  dbconfigfile "
+        log_echo "error" "${func}" "You can use like: ${func}  [  db.conf   ]"
+        return 1
+    fi
+    log_echo "info" "$func" "Enter $func with successed."
+    typeset dbconfigfile="$1"
+    checkFileExists "${dbconfigfile}"  || return 1
+    . ${dbconfigfile}
+    typeset sqlfile="/tmp/$func.sql"
+    typeset outfile="/tmp/$func.tmp"
+    echo "select 1 from dual;" > ${sqlfile}
+    execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${outfile}"  || return 1
+    log_echo "info" "$func" "Exit $func with successed."
+    return 0
+}
+
+##########  check app ##############
+checkApp()
+{
+    typeset func=checkApp
+    if [ $# -ne 4 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  detail_use_config_file  pkgname  leastDiskSize"
+        log_echo "error" "${func}" "You can use like : ${func}  ${TOMCAT_USE_DETAIL_FILE}  me.war   2"
+        return 1
+    fi
+    typeset detailuseconfigfile="$1"
+    typeset pkgname="$2"
+    typeset sysconfigfile="$3"
+    typeset leastDiskSize="$4"
+    
+    typeset eachpkgname=""
+    typeset eachuser=""
+    typeset eachtomcatdir=""
+    typeset i=1
+    typeset userNum=0
+    typeset eachDir=""
+    typeset eachconfigfile=""
+    typeset configfile=""
+    typeset eachitem=""
+    typeset tmpFile="/tmp/$func.tmp"
+    
+    . ${sysconfigfile}
+    grep "^${pkgname}_${localip}_" ${detailuseconfigfile} > ${tmpFile}
+    if [ ! -s "${tmpFile}" ];then
+        log_echo "error" "${func}" "Can not get config items from file : [  ${detailuseconfigfile}   ]"
+        return 1
+    fi
+    sed -i 's#^'"${pkgname}"'_'"${localip}"'_##g'  "${tmpFile}"
+    if [ $? -ne 0 ];then
+        log_echo "error" "${func}" "Command error,CMD = [    sed -i 's#^'"${pkgname}"'_'"${localip}"'_##g'  "${tmpFile}"    ]"
+        return 1
+    fi
+    cat "${tmpFile}" >> ${sysconfigfile}
+    echo "" >> ${sysconfigfile}
+    . ${sysconfigfile}
+
+    userNum=`echo ${#user[@]}`
+    if [ ${userNum} -eq 0 ];then
+        log_echo "error" "${func}" "User number is error ,please check file : [  ${sysconfigfile}     ]"
+        return 1
+    fi
+    for i in `seq $userNum`;do
+        eval eachpkgname=${pkgname[$i]}
+        eval eachuser=${user[$i]}
+        eval eachtomcatdir=${tomcatdir[$i]}
+        eval eachconfigfile=${tomcatconfigfile[$i]}
+        typeset prefixPkgName=`echo "${eachpkgname}" | awk -F'.' '{print $1}'`
+        typeset tomcatpkgdir="${eachtomcatdir}/webapps/${prefixPkgName}"
+        
+        log_echo "info" "$func" "Enter check config file is right."
+        ### check user ###
+        checkUserExists "${eachuser}" || return 1
+        checkDirExists "${tomcatpkgdir}" || return 1
+        checkFileExists "${BIN_DIR}/${eachconfigfile}"  || return 1
+        cp -f "${BIN_DIR}/${eachconfigfile}"  "${CONFIG_DIR}/"
+        configfile="${CONFIG_DIR}/${eachconfigfile}"
+        
+        #### 读取配置文件 检查里面的配置项目是否正确  #####
+        while read eachitem;do
+            typeset pathconfigfile="${tomcatpkgdir}/${eachitem}"
+            log_echo "info" "$func" "Check config file : [    ${configfile}      ] ,item : [  ${pathconfigfile}   ] .." 
+            checkFileExists "${pathconfigfile}" || return 1
+        done < ${configfile}
+        log_echo "info" "$func" "Check [  ${eachpkgname}   ],tomcat dir: [  ${tomcatpkgdir}  ] with user : [    ${eachuser}   ] successed ."
+    done
+    
+    #########  check size of disk #####
+    getFileSystemCanUseSize "${backupBaseDir}" || return 1
+    typeset curSize="${RETURN[0]}"
+    typeset retStr=`echo "${curSize}" | grep -E "M|K" `
+    if [ ! -z "${retStr}" ];then
+        log_echo "error" "$func" "Size not enough. please check."
+        return 1
+    fi
+    curSize=`echo "${curSize}" | awk -F'G' '{print $1}'`
+    if [ "${curSize}" -lt "${leastDiskSize}" ];then
+        log_echo "error" "$func" "Current Size:[ ${curSize} ] ,set size:[ ${leastDiskSize} ] not enough. please check."
+        return 1
+    fi
+    log_echo "info" "${func}" "Check disk size successed."
+    
+    #######  check expect installed ########
+    installExpect "/tmp/installExpect.log" || return 1
+    rm -f ${tmpFile}
+    log_echo "info" "Exit func ${func} with successed."
+    return 0
+}
+
+#########  backup  app to directory ########
+backupApp()
+{
+    typeset func=backupApp
+    if [ $# -ne 4 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  backupBaseDir   packageName    sysconfigfile   [tomcat|php] "
+        log_echo "error" "${func}" "You can use like : ${func} ${BACKUPAPP_BASE_DIR} me.war  sysconfigfile  tomcat "
+        return 1
+    fi
+    log_echo "info" "$func" "Enter ${func} with successed."
+    
+    typeset backupBaseDir="$1"
+    typeset packageName="$2"
+    typeset sysconfigfile="$3"
+    typeset envtype="$4"
+    
+    if [ "${envtype}" != "tomcat" ];then
+        log_echo "error" "$func" "Not support env envtype :${envtype} ,so exit."
+        return 1
+    fi
+    backupTomcatApp  "${backupBaseDir}"   "${packageName}"   "${sysconfigfile}"  || return 1   
+    log_echo "info" "Exit func ${func} with successed."
+    return 0
+}
+
+####  get local ip address  返回值是个数组 ######
+getLocalIp()
+{
+    typeset func=getLocalIp
+    #log_echo "info" "Enter ${func} with successed."
+    typeset localIP=`/sbin/ifconfig | grep "inet addr:" | grep -vE "127.0.0.1|192.168\..*|169.254\..*" | awk '{print $2}' | awk -F':' '{print $2}'`
+    #typeset localIP=`/sbin/ifconfig | grep "inet addr:" | grep -vE "127.0.0.1|169.254\..*" | awk '{print $2}' | awk -F':' '{print $2}'`
+    if [ -z "${localIP}" ];then
+        log_echo "error" "${func}" "Get localIP address failed."
+        return 1
+    fi
+    RETURN[0]="${localIP}"
+    log_echo "info" "Exit func ${func} with successed."
+    return 0
+}
+
+#####  tar file ready to send to remote host ########
+tarGzFile()
+{
+    typeset func=tarGzFile
+    if [ $# -ne 2 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func} Directory tarFileName "
+        return 1
+    fi
+    
+    typeset theDir="$1"
+    typeset tarFileName="$2"
+    
+    cd ${theDir}
+    typeset retStr=`ls ./`
+    if [ -z "${retStr}" ];then
+        log_echo "error" "${func}" "The directory : ${theDir} is null ."
+        return 1
+    fi
+    
+    tar -zcf ${tarFileName} *
+    if [ $? -ne 0 ];then
+        log_echo "error" "${func}" "Exit func ${func} with failed."
+        return 1
+    fi
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0
+}
+
+#### get ssh num connect ##########
+getSSHConnectNum()
+{
+    typeset func=getSSHConnectNum
+    SSH_CON_FILE=/etc/ssh/sshd_config
+    typeset tmpStr=`grep "^MaxStartups" ${SSH_CON_FILE} 2>/dev/null`
+    if [ -z "${tmpStr}" ];then
+        log_echo "error" "${func}" "Max connect number not set , please set in file :${SSH_CON_FILE}"
+        RETURN[0]=""
+        return 1
+    fi
+    typeset setNum=`echo "${tmpStr}" | awk '{print $2}'`
+    RETURN[0]=${setNum}
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0
+}
+
+########   修改服务端连接信息  ######
+modifyConnectConfigFile()
+{
+    typeset func=modifyConnectConfigFile
+    if [ $# -ne 3 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  orgConfigFile   newConfigFile   ipaddress "
+        log_echo "error" "${func}" "Parameter error usage : ${func} allconnect.conf   connect.conf  10.10.12.165 10.10.12.165 "
+        return 1
+    fi
+    typeset allConfigFile="$1"
+    typeset newConfigFile="$2"
+    typeset ipaddresses="$3"
+    typeset eachIp=""
+    
+    for eachIp in "${localip}"  "${ipaddresses}";do
+        grep "${eachIp}"  "${allConfigFile}" >> ${newConfigFile}
+        if [ $? -ne 0 ];then
+            log_echo "error" "${func}" "Can not found ip address:[ ${eachIp} ] in file:[ ${allConfigFile} ] please check."
+            return 1
+        fi
+    done
+    
+    typeset lines=`wc -l ${newConfigFile} | awk '{print $1}'`
+    if [ ${lines} -lt 1 ];then
+        log_echo "error" "${func}" "Miss ip address : [  ${ipaddress}  ] or not found local ip address : [  ${localip}  ] in file : [   ${newConfigFile}   ]."
+        return 1
+    fi
+    
+    sort -u "${newConfigFile}" | uniq > "${newConfigFile}.tmp"
+    cat "${newConfigFile}.tmp" > "${newConfigFile}"
+    rm -f "${newConfigFile}.tmp"
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0
+}
+
+
+######### 修改客户端脚本参数 ########
+modifyClientConfigFile()
+{
+    typeset func=modifyClientConfigFile
+    if [ $# -ne 9 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func} configFile clientScriptName  [YES|NO]  [upload|check|upgrade|backupall|backup|rollback]   packageName  [yfb|sc]  backupDir theVersion"
+        log_echo "error" "${func}" "Parameter like : ${func}  client.conf  autoUpgradeClient.sh  YES   upload   ceshi1.war   backupDir  tomcat   20150602_2010_1433247002  none "
+        return 1
+    fi
+    
+    typeset configFile="$1"
+    typeset clientScriptName="$2"
+    typeset havaResultFile="$3"
+    typeset action="$4"
+    typeset pkgName="$5"
+    typeset bakDir="$6"
+    typeset envName="$7"
+    typeset dataTs="$8"
+    typeset theVersion="$9"
+
+    sed -i 's/EXEC_CLIENT_SCRIPT=.*/EXEC_CLIENT_SCRIPT='"${clientScriptName}"'/'  "${configFile}"
+    sed -i 's/havaResultFile=.*/havaResultFile='"${havaResultFile}"'/'  "${configFile}"
+    sed -i 's/PARAMETER\[1\]=.*/PARAMETER\[1\]='"${action}"'/'  "${configFile}" 
+    sed -i 's/PARAMETER\[2\]=.*/PARAMETER\[2\]='"${pkgName}"'/'  "${configFile}"
+    sed -i 's/PARAMETER\[3\]=.*/PARAMETER\[3\]='"${envName}"'/'  "${configFile}" 
+    sed -i 's#PARAMETER\[4\]=.*#PARAMETER\[4\]='"${bakDir}"'#'  "${configFile}"
+    sed -i 's#PARAMETER\[5\]=.*#PARAMETER\[5\]='"${dataTs}"'#'  "${configFile}"
+    sed -i 's#PARAMETER\[6\]=.*#PARAMETER\[6\]='"${theVersion}"'#'  "${configFile}"
+    if [ $? -ne 0 ];then
+        log_echo "error" "${func}" "Command error , $func  failed."
+        return 1
+    fi
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0
+}
+
+#########  跟据 包名 和 环境（ tomcat ）得到 对应的IP地址  #######
+accordPkgNameEnvNameGetIpAddress()
+{
+    typeset func=accordPkgNameEnvNameGetIpAddress
+    if [ $# -ne 2 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func} [ tomcatdetailconfig.conf ]    pkgname  "        
+        log_echo "error" "${func}" "You can use like: ${func} [ tomcatdetailconfig.conf ]    test.war  "
+        return 1
+    fi
+    log_echo "info" "$func" "Enter $func with successed. "
+    RETURN[0]=""
+    
+    typeset detailConfigFile="$1"
+    typeset pkgName="$2"
+    typeset eachip=""
+    typeset tmpFile="/tmp/$func.tmp"
+    
+    checkFileExists  "${detailConfigFile}"  || return 1
+    
+    grep "^${pkgName}_"  ${detailConfigFile} | awk -F'_' '{print $2}'  | sort -u | uniq > ${tmpFile}
+    sed -i '/^$/d' ${tmpFile} && sed -i /^[[:space:]]*$/d  ${tmpFile}
+    while read eachip;do
+        if [ -z "${RETURN[0]}" ];then
+            RETURN[0]="${eachip}"
+        else
+            RETURN[0]="${RETURN[0]}  ${eachip}"
+        fi
+    done < ${tmpFile}
+    if [ -z "${RETURN[0]}" ];then
+        log_echo "error" "${func}" "Get ip address failed."
+        return 1
+    fi
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0
+} 
+
+###  install expect #########
+installExpect()
+{
+    typeset func=installExpect
+    if [ $# -ne 1 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func} INSTALL_LOG_FILE "
+        return 1
+    fi
+    #log_echo "info" "$func" "Enter $func with successed."
+    typeset INSTALL_LOG_FILE=$1
+    which expect >/dev/null 2>&1
+    if [ $? -ne 0 ];then
+        yum -y install expect >> ${INSTALL_LOG_FILE}
+        if [ $? -ne 0 ];then
+            log_echo "error" "$func" "Exec command failed , CMD=[    yum -y install expect  ],more info please check file : [  ${INSTALL_LOG_FILE}  ]"
+            flag=1
+        fi
+    fi    
+    rm -f ${INSTALL_LOG_FILE}
+    log_echo "info" "$func" "Exit func $func with successed."
+    return 0
+}
+
+#######  add script to crontab ###########
+addCrontab()
+{
+    typeset func=addCrontab
+    if [ $# -ne 6 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func} * * * * * command "
+        return 1
+    fi
+
+    typeset minute=$1
+    typeset hour=$2
+    typeset day=$3
+    typeset mouth=$4
+    typeset week=$5
+    typeset command=$6
+
+    typeset cronTmpFile=~/corntab.tmp
+
+    typeset tmpStr=`crontab -l | grep -v "^#" | grep "${command}"`
+    if [ -z "${tmpStr}" ];then
+        #### add crontab ####
+        crontab -l | grep -v "^#" > ${cronTmpFile}
+        echo "${minute} ${hour} ${day} ${mouth} ${week} ${command}" >>${cronTmpFile}
+        crontab ${cronTmpFile} 1>/dev/null 2>&1
+        if [ $? -ne 0 ];then
+            log_echo "error" "${func}" "Add crontab failed."
+            rm -f ${cronTmpFile}
+            return  1
+        fi
+    fi
+
+    rm -f ${cronTmpFile}
+    log_echo "info" "$func" "Exit func $func with successed."
+    return 0
+} 
+
+getFileSystemCanUseSize()
+{
+    typeset func=getFileSystemCanUseSize
+    if [ $# -ne 1 ];then
+        log_echo "error" "$func" "Parameter error ,usage : ${func} /backall"
+        return 1
+    fi
+    fileSystem="$1"
+    RETURN[0]=""
+
+    while [ "${fileSystem}" != "/" ];
+    do
+        if [ ! -d "${fileSystem}" ];then
+            fileSystem=`dirname "${fileSystem}"`
+        else
+            break
+        fi    
+    done
+    
+    typeset canUseSize=`df -Ph ${fileSystem} | grep -v Filesystem | awk '{print $4}' | awk -F'%' '{print $1}'`
+    if [ -z "${canUseSize}" ];then
+        log_echo "error" "$func" "canUseSize value is null ,unkown error."
+        return 1 
+    fi
+    
+    RETURN[0]="${canUseSize}"
+    log_echo "info" "$func" "Exit func $func with successed."
+    return 0
+}
+
+getFileSystemUsed()
+{
+    typeset func=getFileSystemUsed
+    if [ $# -ne 1 ];then
+        log_echo "error" "$func" "Parameter error ,usage : ${func} /backall"
+        return 1
+    fi
+    
+    fileSystem="$1"
+    RETURN[0]=""
+
+    used=`df -Ph ${fileSystem} | grep -v Filesystem | awk '{print $5}' | awk -F'%' '{print $1}'`
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Command error ,CMD = [     df -Ph ${fileSystem} | grep -v Filesystem | awk '{print $5}' | awk -F'%' '{print $1}'           ]"
+        return 1        
+    fi
+    
+    if [ -z "${used}" ];then
+        log_echo "error" "$func" "used value is null ,unkown error."
+        return 1 
+    fi
+    
+    RETURN[0]="${used}"
+    #log_echo "info" "$func" "Exit func $func with successed."
+    return 0
+}
+
+############ 得到文件大小，以M 返回 返回值在 RETURN[0] 中 小于1M 用0返回。  ##############
+getFileSize()
+{
+    typeset func=getFileSize
+    if [ $# -ne 1 ];then
+        log_echo "info" "$func" "Parameter error ,usage $func demoFile"
+        return 1
+    fi
+    theFile="$1"
+
+    checkFileExists  "${theFile}"  || return 1    
+    
+    fileSize=$(du -k "${theFile}" | awk '{print $1}')
+    fileSize=$(expr ${fileSize} / 1024)
+    
+    RETURN[0]=${fileSize}
+    log_echo "info" "$func" "Exit func $func with successed."
+    return 0
+}
+
+backupAllEnv()
+{
+    typeset func=backupAllEnv
+    typeset tomcatDir="$4"
+    
+    getLocalIp || return 1
+    typeset localIp="${RETURN[0]}"
+    
+    typeset localIp=`echo "${localIp}" | head -1`
+    typeset timeFactor="`basename "${backupDir}"`"
+    typeset backupDir="${backupDir}/${localIp}"
+    
+    typeset theHostName="`hostname`"
+    
+    typeset tomcatDirs=`ls -d ${tomcatDir} 2>/dev/null` 
+    
+    if [ ! -z "${tomcatDirs}" ];then
+        log_echo "info" "$func" "Backup tomcat ..."
+        mkdir -p "${backupDir}"
+        if [ $? -ne 0 ];then
+            log_echo "error" "$func" "Create directory failed. CMD:[   mkdir -p "${backupDir}"  ]"
+            return 1
+        fi          
+        backupTomcatAll "${backupDir}"  "${tomcatDir}" || return 1
+        log_echo "info" "$func" "Backup tomcat successed."
+    else
+        log_echo "info" "$func" "Directory all not exists ,so need not backup."
+        return 0
+    fi
+    
+    log_echo "info" "$func" "Backup successed."
+    return 0
+}
+
+backupTomcatAll()
+{
+    typeset func=backupTomcatAll
+    typeset backupDir="$1"
+    typeset tomcatDir="$2"
+    
+    typeset tomcatDirs=`ls -d ${tomcatDir} 2>/dev/null`
+    
+    if [ -z "${tomcatDirs}" ];then
+        log_echo "error" "$func" "The directory tomcatDirs is not exsists. "
+        return 1
+    fi
+    
+    typeset tomcatAllLinkFiles=/tmp/tomcatlinkfile.tmp
+    typeset tomcatAllFiles=/tmp/tomcatallfiles.tmp
+    typeset tomcatAllDirs=/tmp/tomcatalldir.tmp
+    
+    typeset tomcatAllFileUse=/tmp/tomcatallfileuse.tmp
+    typeset maxusage=95
+    
+    >${tomcatAllLinkFiles}
+    >${tomcatAllFiles}
+    >${tomcatAllDirs}
+    >${tomcatAllFileUse}
+    
+    for eachTomDir in `echo "${tomcatDirs}"`
+    do
+        if  [ -d "${eachTomDir}" ];then
+            find "${eachTomDir}" -type d >> ${tomcatAllDirs}
+            find "${eachTomDir}" -type l >> ${tomcatAllLinkFiles}
+            find "${eachTomDir}" -type f >> ${tomcatAllFiles}
+        fi
+    done
+    
+    #####   logs not backup  ######
+    grep -v ".*/logs/.*"  "${tomcatAllFiles}"  | grep -v  ".*/temp/.*" | grep -v  ".*/.*\.log" | grep -v "/java_pid.*\.hprof" >> ${tomcatAllFileUse}
+    
+    ####  create backup dir ########
+    cat "${tomcatAllDirs}" | while read eachDir
+    do
+        if [ ! -d "${backupDir}/${eachDir}" ];then
+            mkdir -p "${backupDir}/${eachDir}"
+            if [ $? -ne 0 ];then
+                log_echo "error" "$func" "Create direcotry failed. CMD=[   mkdir -p "${backupDir}/${eachDir}"    ]"
+                return 1
+            fi
+        fi
+    done
+    
+    #######  backup all files #########
+    cat "${tomcatAllFileUse}" | while read eachBakFile
+    do
+        getFileSystemUsed "${backupDir}" || return 1
+        if [ "${RETURN[0]}" -gt "${maxusage}" ];then
+            log_echo "error" "$func" "Disk usage greater than number : ${maxusage}%"
+            return 1
+        fi     
+        cp -f "${eachBakFile}"  "${backupDir}"/"${eachBakFile}"
+        if [ $? -ne 0 ];then
+            log_echo "error" "$func" "Copy file failed.  CMD=[   cp -f "${eachBakFile}"  "${backupDir}"/"${eachBakFile}"    ]"
+            return 1
+        fi
+    done
+    
+    if [ ! -s "${tomcatAllLinkFiles}" ];then
+        log_echo "info" "$func" "Link file is not exists ,so need not to backup."
+        return 0
+    fi
+    
+    #######  backup link files ########
+    cat "${tomcatAllLinkFiles}" | while read eachLindFile
+    do
+        cp -f "${eachLindFile}"  "${backupDir}/${eachLindFile}"
+        if [ $? -ne 0 ];then
+            log_echo "error" "$func" "Copy file failed.  CMD=[   cp -f "${eachLindFile}"  "${backupDir}/${eachLindFile}"    ]"
+            return 1
+        fi
+    done   
+    
+    rm -f ${tomcatAllLinkFiles}  ${tomcatAllFiles}  ${tomcatAllDirs}  ${tomcatAllFileUse}
+    
+    log_echo "info" "$func" "Backup successed."
+    return 0
+}
+
+########  is mounted path ??  return YES/NO  ########
+isMountedPath()
+{
+    typeset func=isMountedPath
+    typeset MountPath="$1"
+    RETURN[0]=""
+    if [ -z "${MountPath}" ];then
+        log_echo "error" "$func" "Parameter error,$func mountPath"
+        return 1
+    fi
+    df -Ph | grep "${MountPath}" >/dev/null 2>&1
+    if [ $? -ne 0 ];then
+        RETURN[0]="NO"
+    else
+        RETURN[0]="YES"
+    fi
+    log_echo "info" "Exit func ${func} with successed."
+    return 0
+}
+
+###  mount some path ########
+mountPath()
+{
+    typeset func=mountPath
+    if [ $# -ne 2 ];then
+        log_echo "error" "${func}" "Parameter error , usage : ${func} mountPath mountStr"
+        log_echo "error" "${func}" "You can ues like this: ${func} /backall  "10.10.4.142:/vol/databaklv/databak ${mountPath1} nfs defaults 0 0""
+        return 1
+    fi    
+    
+    typeset moutePath="$1"
+    typeset mouteStr="$2"
+    
+    typeset mountFile="/etc/fstab"
+    
+    isMountedPath "${moutePath}"
+    if [ "${RETURN[0]}" = "YES" ];then
+        log_echo "info" "$func" "The path has been mounted path :[ ${moutePath} ]"
+        return 0
+    fi
+    
+    checkFileExists  "${mountFile}"  || return 1
+   
+    if [ ! -w "${mountFile}" ];then
+        chmod +w "${mountFile}"
+        if [ $? -ne 0 ];then
+            log_echo "error" "$func" "Command error,CMD=[   chmod +w "${mountFile}"   ]"
+            return 1
+        fi
+    fi       
+    
+    if [ -d "${moutePath}" ];then
+        mv "${moutePath}" "${moutePath}-local" 
+        if [ $? -ne 0 ];then
+            log_echo "error" "$func" "Command error,CMD=[  mv "${moutePath}" "${moutePath}-local"     ]"
+            return 1
+        fi
+    fi    
+    mkdir -p "${moutePath}"    
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Command error,CMD=[  mkdir -p "${moutePath}"      ]"
+        return 1
+    fi
+    
+    grep "${moutePath}" "${mountFile}" >/dev/null 2>&1
+    if [ $? -ne 0 ];then
+        echo "${mouteStr}" >> "${mountFile}"
+    fi    
+    mount -a 
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Command error,CMD=[   mount -a    ]"
+        return 1
+    fi
+    log_echo "info" "Exit func ${func} with successed."
+    return 0
+}
+
+#########  删除之前备份文件目录 全备文件  #########
+deleteBeforeBackup()
+{
+    typeset func=deleteBeforeBackup
+    if [ $# -ne 1 ];then
+        log_echo "error" "${func}" "Parameter error,usage:$func backupDir "
+        log_echo "error" "${func}" "Like : $func  ${BACKUP_BASE_DIR}"
+        return 1
+    fi
+    typeset backupDir="$1"
+    
+    typeset tmpFile=/tmp/${func}.tmp
+    typeset tmpDirFile=/tmp/${func}_dir.tmp
+    typeset tmpDeleteDirFile=/tmp/${func}_deletedir.tmp
+    
+    typeset backupUpDir=`dirname "${backupDir}"`
+    typeset backupDirName=`basename "${backupDir}"`
+    
+    typeset localIp=""
+    getLocalIp || return 1
+    localIp="${RETURN[0]}"
+    localIp=`echo "${localIp}" | head -1`
+    
+    >${tmpFile}
+    >${tmpDirFile}
+    >${tmpDeleteDirFile}
+    
+    cd ${backupUpDir} && ls -A > ${tmpFile}
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Command error,CMD=[    cd ${backupUpDir} && ls -A       ]"
+        return 1
+    fi
+    
+    if [ ! -s "${tmpFile}" ];then
+        log_echo "error" "$func" "File is emputy,please check, file:[  ${tmpFile}   ]"
+        return 1
+    fi
+    
+    cat "${tmpFile}" | while read line
+    do
+        typeset tmpDir="${backupUpDir}"/"${line}"
+        if [ -d "${tmpDir}" ];then
+            echo "${tmpDir}" >> ${tmpDirFile}
+        fi
+    done
+    
+    if [ ! -s "${tmpDirFile}" ];then
+        log_echo "error" "$func" "File is emputy,please check, file:[  ${tmpDirFile}   ]"
+        return 1
+    fi
+    
+    grep -v "${backupDirName}"  "${tmpDirFile}" | grep ".*201[0-9]\{5\}_[0-9]\{4\}_[0-9]\{8\}.*" > ${tmpDeleteDirFile}
+    
+    if [ -s "${tmpDeleteDirFile}" ];then
+        cat "${tmpDeleteDirFile}" | while read line
+        do
+            #echo "delete ${line} test...."
+            rm -rf "${line}/${localIp}"
+            typeset tmpStr=`ls "${line}"`
+            if [ -z "${tmpStr}" ];then
+                rm -rf "${line}"
+            fi
+        done
+    else
+        log_echo "info" "$func" "Delete directory is emputy.so need not deal"
+    fi
+
+    rm -f ${tmpFile} ${tmpDirFile} ${tmpDeleteDirFile}
+            
+    log_echo "info" "$func" "Exit $func with successed."
+    return 0
+}
+
+#### send email to ########
+sendEmail()
+{
+    typeset func=sendEmail
+    if [ $# -ne 3 ];then
+        log_echo "error" "$func" "Parameter error ,usage: $func title  contents  connects"
+        log_echo "error" "$func" "Like: ${func} this_title this_contents guanghua.fan@a.com,zhangsan@c.com"
+        return 1
+    fi
+    typeset title="$1"
+    typeset contents="$2"
+    typeset connects="$3"
+    #typeset emailFile="/usr/bin/email"
+    #checkFileExists "${emailFile}"  || return 1
+    echo "${title}" | mailx -v -s "${contents}"  "${connects}" >/dev/null 2>&1
+    #echo "${title}" | ${emailFile} -s "${contents}" "${connects}"
+    if [ $? -ne 0 ];then
+        log_echo "error" "Send email failed. CMD=[   echo "${title}" | mailx -v -s "${contents}"  "${connects}"    ]"
+        return 1
+    fi
+    log_echo "info" "$func" "Exit $func with successed."
+    return 0
+}
+
+#############  encrypt password #######
+encrypt()
+{
+    typeset func=encrypt
+    if [ $# -ne 1 ];then
+        log_echo "error" "${func}" "Parameter error , usage : ${func} orgPassword"
+        return 1
+    fi
+    typeset orgPassword="$1"
+    RETURN[0]=""
+    which openssl >/dev/null 2>&1
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Can not find openssl command , please check openssl installed."
+        return 1
+    fi
+    RETURN[0]=`echo "${orgPassword}" | openssl aes-128-cbc -k crland.com.cn123 -base64`
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Encrypt failed. CMD=[    echo "${orgPassword}" | openssl aes-128-cbc -k *** -base64     ]."
+        return 1
+    fi
+    if [ -z "${RETURN[0]}" ];then
+        log_echo "error" "$func" "Encrypt failed. encrypt password is null."
+        return 1
+    fi
+    log_echo "info" "${func}" "Exit func : ${func} with succesed."    
+    return 0
+}
+
+#############  decrypt password #######
+decrypt()
+{
+    typeset func=decrypt
+    if [ $# -ne 1 ];then
+        log_echo "error" "${func}" "Parameter error , usage : ${func} decryptPassword"
+        return 1
+    fi
+    typeset decryptPassword="$1"
+    RETURN[0]=""
+    which openssl >/dev/null 2>&1
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Can not find openssl command , please check openssl installed."
+        return 1
+    fi
+    RETURN[0]=`echo "${decryptPassword}" | openssl aes-128-cbc -d -k crland.com.cn123 -base64`
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Encrypt failed. CMD=[    echo "${decryptPassword}" | openssl aes-128-cbc -d -k *** -base64     ]."
+        return 1
+    fi
+    if [ -z "${RETURN[0]}" ];then
+        log_echo "error" "$func" "Decrypt failed. decrypt password is null."
+        return 1
+    fi
+    #log_echo "info" "${func}" "Exit func ${func} with succesed."    
+    return 0
+}
+
+#########  upgrade  app  ########
+upgradeApp()
+{
+    typeset func=upgradeApp
+    if [ $# -ne 4 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}   packageFile  sysconfigfile  [tomcat|php]"
+        return 1
+    fi
+    typeset packageFile="$1"
+    typeset sysconfigfile="$2"
+    typeset backupBaseDir="$3"
+    typeset envtype="$4"
+    
+    if [ "${envtype}" != "tomcat" ];then
+        log_echo "error" "$func" "envtype:[ ${envtype} ] not support now ." 
+        return 1
+    fi
+    #### stop tomcat ####
+    log_echo "info" "$func" "Is going to stop [   ${packageFile}   ]  tomcat app ..."
+    stopTomcatApp "${sysconfigfile}" || return 1
+    
+    #### upgrade tomcat  ####
+    log_echo "info" "${func}" "Is going to upgrade tomcat [   ${packageFile}    ]  app ..."
+    upgradeTomcatApp "${packageFile}"  "${sysconfigfile}"  "${backupBaseDir}"  || return 1
+        
+    ####  start tomcat   ###
+    log_echo "info" "$func" "Upgrade pkg:[ ${packageFile}  ] successed , wait to start app ..."
+    startTomcatApp  "${sysconfigfile}"  "300"  "20"  || return 1
+    log_echo "info" "Exit func ${func} with successed."
+    return 0
+}
+
+######### 停止 tomcat  #########
+stopTomcatApp()
+{
+    typeset func=stopTomcatApp
+    if [ $# -ne 1 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}   sysconfigfile "
+        return 1
+    fi
+    typeset sysconfigfile="$1"
+    typeset eachpkgname=""
+    typeset eachuser=""
+    typeset eachtomcatdir=""
+    typeset i=1
+    typeset userNum=0
+    typeset eachuserids=""
+    typeset eachuserid=""
+    
+    checkFileExists "${sysconfigfile}"  || return 1
+    . ${sysconfigfile}
+    
+    userNum=`echo ${#user[@]}`
+    if [ ${userNum} -eq 0 ];then
+        log_echo "error" "${func}" "User number is error ,please check file : [  ${sysconfigfile}     ]"
+        return 1
+    fi
+    for i in `seq $userNum`;do
+        eval eachpkgname=${pkgname[$i]}
+        eval eachuser=${user[$i]}
+        eval eachtomcatdir=${tomcatdir[$i]}
+        getUserJavaProcessesId "${eachuser}"
+        eachuserids="${RETURN[0]}"
+        if [ -z "${eachuserids}" ];then
+            log_echo "info" "$func" "Not found java processes ,so exist."
+            continue
+        fi
+        
+        for eachuserid in `echo "${eachuserids}"`;do
+            if [ "${eachuser}" != "root" ];then
+                su - ${eachuser} <<EOF
+kill -9 ${eachuserid}
+EOF
+            else
+                kill -9 ${eachuserid}
+            fi
+            if [ $? -ne 0 ];then
+                log_echo "error" "${func}" "Exec command error , CMD = [  kill -9 ${eachuserid}   ]"
+                return 1
+            fi
+        done
+        log_echo "info" "$func" "Stoped [  ${eachpkgname}   ],tomcat dir: [  ${eachtomcatdir}  ] with user : [    ${eachuser}   ]  pid : [ ${eachuserid}  ]successed ."
+    done
+    log_echo "info" "Exit func ${func} with successed."
+    return 0
+}
+
+####### upgrade tomcat  war   ########
+upgradeTomcatApp()
+{
+    typeset func=upgradeTomcatApp
+    if [ $# -ne e ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func} upgradePackageFile  sysconfigfile "
+        return 1
+    fi
+    typeset upgradePackageFile="$1"
+    typeset sysconfigfile="$2"
+    typeset backupBaseDir="$3"
+    
+    typeset eachpkgname=""
+    typeset eachuser=""
+    typeset eachtomcatdir=""
+    typeset eachconfigfile=""
+    typeset i=1
+    typeset userNum=0
+    typeset eachitem=""
+    typeset pathconfigfile=""
+    typeset backupconfigfile=""
+    typeset tomcatpkgdir=""
+    typeset tomcatwebappsdir=""
+    typeset prefixPkgName=""
+    typeset configfile=""
+
+    checkFilesExists "${sysconfigfile}"  "${upgradePackageFile}" || return 1
+    . ${sysconfigfile}
+    
+    userNum=`echo ${#user[@]}`
+    if [ ${userNum} -eq 0 ];then
+        log_echo "error" "${func}" "User number is error ,please check file : [  ${sysconfigfile}     ]"
+        return 1
+    fi
+    for i in `seq $userNum`;do
+        eval eachpkgname=${pkgname[$i]}
+        eval eachuser=${user[$i]}
+        eval eachtomcatdir=${tomcatdir[$i]}
+        eval eachconfigfile=${tomcatconfigfile[$i]}
+        prefixPkgName=`echo "${eachpkgname}" | awk -F'.' '{print $1}'`
+        tomcatpkgdir="${eachtomcatdir}/webapps/${prefixPkgName}"
+        tomcatwebappsdir="${eachtomcatdir}/webapps"
+        if [ "${eachuser}" != "root" ];then
+            su - ${eachuser} -c "rm -f ${tomcatwebappsdir}/${eachpkgname}  && rm -r ${tomcatwebappsdir}/${prefixPkgName} && cd ${tomcatwebappsdir} && unzip -d ${prefixPkgName} ${upgradePackageFile}"
+        else
+            rm -f ${tomcatwebappsdir}/${eachpkgname}  && rm -r ${tomcatwebappsdir}/${prefixPkgName} && cd ${tomcatwebappsdir} && unzip -d ${prefixPkgName} ${upgradePackageFile}
+        fi
+        if [ $? -ne 0 ];then
+            log_echo "error" "${func}" "Upgrade failed , CMD = [ su - ${eachuser} -c "rm -r ${tomcatwebappsdir}/${prefixPkgName} && cd ${tomcatwebappsdir} && unzip -d ${prefixPkgName} ${upgradePackageFile} "  ] or  [      rm -r ${tomcatwebappsdir}/${prefixPkgName} && cd ${tomcatwebappsdir} && unzip -d ${prefixPkgName} ${upgradePackageFile}   ]"
+            return 1
+        fi
+        log_echo "info" "$func" "Upgrade [  ${eachpkgname}   ],tomcat dir: [  ${tomcatwebappsdir}  ] with user : [    ${eachuser}   ] successed ,going to restore config file"
+
+        log_echo "info" "$func" "Ready to restore each config file ."
+        configfile="${CONFIG_DIR}/${eachconfigfile}"
+        #### 读取备份的配置文件 并且一一进行还原  #####
+        while read eachitem;do
+            pathconfigfile="${tomcatpkgdir}/${eachitem}"
+            backupconfigfile="`dirname ${backupBaseDir}`/${pathconfigfile}"
+            if [ "${eachuser}" != "root" ];then
+                su - ${eachuser} -c "cp -f ${backupconfigfile}  ${pathconfigfile}"
+            else
+                cp -f ${backupconfigfile}  ${pathconfigfile}            
+            fi
+            if [ $? -ne 0 ];then
+                log_echo "error" "$func" "Restore config file failed , CMD = [   su - ${eachuser} -c "cp -f ${backupconfigfile}  ${pathconfigfile}"      ]  or  [     cp -f ${backupconfigfile}  ${pathconfigfile}        ] " 
+                return 1
+            fi
+            log_echo "info" "$func" "Restore file : [    ${backupconfigfile}     ] to dir : [   ${pathconfigfile}   ] successed ."
+        done < ${configfile}
+    done
+    log_echo "info" "Exit func ${func} with successed."
+    return 0    
+}
+
+#####  unzip war to dir #######
+unzipWar()
+{
+    typeset func=unzipWar
+    if [ $# -ne 2 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func} xx.war  unzipDir"
+        log_echo "error" "${func}" "You can use like this:${func} ceshi1.war ceshi1"
+        return 1
+    fi    
+    typeset pkgWarFile="$1"
+    typeset unzipDir="$2"    
+    
+    if [ ! -f "${pkgWarFile}" -o -d "${unzipDir}" ];then
+        log_echo "error" "${func}" "You must be make sure file:[ ${pkgWarFile}  ] exists, and dir:[  ${unzipDir}  ] not exists.please check"
+        return 1
+    fi
+    #typeset pkgWarDir=`dirname "${pkgWarFile}"`
+    unzip -d ${unzipDir} ${pkgWarFile} >/dev/null 2>&1
+    if [ $? -ne 0 ];then
+        log_echo "error" "${func}" "Unzip file failed,CMD=[  unzip -d ${unzipDir} ${pkgWarFile}  ]"
+        return 1
+    fi
+    log_echo "info" "Exit func ${func} with successed."
+    return 0    
+}
+
+####### get file user ########
+getFileUser()
+{
+    typeset func=getFileUser
+    if [ $# -ne 1 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func} file"
+        log_echo "error" "${func}" "You can use like this:${func} /home/a.txt"
+        return 1
+    fi    
+    typeset theFile="$1"
+    RETURN[0]=""
+    checkFileExists "${theFile}"  ||  return 1   
+    RETURN[0]=`ls -l "${theFile}"  | awk '{print $3}'`
+    log_echo "info" "Exit func ${func} with successed."
+    return 0
+}
+####### 恢复应用包的链接文件 ##########
+restoreLinkFile()
+{
+    typeset func=restoreLinkFile
+    if [ $# -ne 3 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  PkgDir  backupDir [tomcat|was]"
+        log_echo "error" "${func}" "Parameter error usage : ${func}  /usr/local/tomcat7-050/webapps/flights1  /backupapp  tomcat"        
+        log_echo "error" "${func}" "Parameter error usage : or  ${func}  /wasprofiles/c01-cc-ful2-02/installedApps/cell01/MpmWeb_war.ear  /backupapp was"
+        return 1
+    fi
+    typeset PkgDir="$1"
+    typeset backupDir="$2"    
+    typeset envTypeFlag="$3"   
+    typeset eachDir=""
+    ##### check dir ######
+    for eachDir in "${PkgDir}"  "${backupDir}";do
+        checkDirExists "${eachDir}" || return 1
+    done
+    typeset pkgDirName=`basename "${PkgDir}"`
+    case "${envTypeFlag}" in
+    tomcat)
+        typeset rLinkFile=${backupDir}/tomcatLinkFile/${pkgDirName}_link.tar.gz
+     ;; 
+     *)
+        log_echo "error" "$func" "Parameter value not right ,please check ${envTypeFlag} must be [ tomcat or was ] "
+        return 1     
+     ;; 
+    esac   
+    ###### not found link file ######  
+    if [ ! -f "${rLinkFile}" ];then
+        log_echo "info" "${func}" "Backup link file is not exists, so need not to deal."
+        return 0
+    fi
+    cp -f ${rLinkFile} ${PkgDir} && cd ${PkgDir} && tar -zxf ${rLinkFile}
+    if [ $? -ne 0 ];then
+        log_echo "info" "${func}" "Restore backup link file failed. CMD=[  cp -f ${rLinkFile} ${PkgDir} && tar -zxf ${rLinkFile}   ]."
+        return 1
+    fi
+    rm -f ${rLinkFile}   ${PkgDir}/${pkgDirName}_link.tar.gz
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0
+}
+
+######  backup package link file ########
+backupLinkFile()
+{
+    typeset func=backupLinkFile
+    if [ $# -ne 3 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  PkgDir  backupDir [tomcat|was]"
+        log_echo "error" "${func}" "Parameter error usage : ${func}  /usr/local/tomcat7-050/webapps/flights1  /backupapp  tomcat"        
+        log_echo "error" "${func}" "Parameter error usage : or  ${func}  /wasprofiles/c01-cc-ful2-02/installedApps/cell01/MpmWeb_war.ear  /backupapp was"
+        return 1
+    fi
+    typeset PkgDir="$1"
+    typeset backupDir="$2"
+    typeset envTypeFlag="$3"
+    
+    typeset eachDir=""
+    for eachDir in "${PkgDir}"  "${backupDir}";do
+        checkDirExists "${eachDir}" || return 1
+    done
+    
+    case "${envTypeFlag}" in
+    tomcat)
+        typeset linkFileDir=${backupDir}/tomcatLinkFile
+     ;; 
+    was)
+        typeset linkFileDir=${backupDir}/wasLinkFile
+     ;;      
+     *)
+        log_echo "error" "$func" "Parameter value not right ,please check ${envTypeFlag} must be [ tomcat or was ] "
+        return 1     
+     ;; 
+    esac      
+    
+    mkdir -p ${linkFileDir} && cd ${PkgDir}
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Command error,CMD=[  mkdir -p ${linkFileDir} && cd ${PkgDir}  ] "
+        return 1          
+    fi
+    typeset tmpStr=`find . -type l`
+    if [ -z "${tmpStr}" ];then
+        log_echo "info" "${func}" "Can not find link file , so need not to backup."
+        return 0
+    fi
+    typeset pkgDirName=`basename "${PkgDir}"`
+    echo "${tmpStr}" | xargs tar -zcf ${linkFileDir}/${pkgDirName}_link.tar.gz
+    if [ $? -ne 0 ];then
+        log_echo "info" "${func}" "Tar link file faild. CMD=[   echo "${tmpStr}" | xargs tar -zcf ${backupDir}/${pkgDirName}_link.tar.gz     ]."
+        return 1
+    fi
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0
+}
+
+####  get tomcat server listen port #######
+getTomcatServerPort()
+{
+    typeset func=getTomcatServerPort
+    if [ $# -ne 1 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  tomcatDir"
+        return 1
+    fi
+    typeset tomcatDir="$1"
+    typeset serverXmlFile="${tomcatDir}/conf/server.xml"
+    RETURN[0]=""
+    
+    checkFileExists  "${serverXmlFile}"  || return 1
+    
+    RETURN[0]=`grep "port=\".*\" protocol=\"HTTP\/1.1\"" ${serverXmlFile} | grep -v 8080 | awk -F'"' '{print $2}'` 
+    if [ -z "${RETURN[0]}" ];then
+        log_echo "error" "${func}" "Tomcat server port not find ,please check file:[  ${serverXmlFile}   ] "
+        return 1
+    fi        
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0    
+}
+
+###### 清理  #######
+cleanupApp()
+{
+    typeset func=cleanupApp
+    if [ $# -ne 5 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  packageName  glassfishRootDir  wasRootDir tomcatRootDir  cleanupDir"
+        return 1
+    fi
+    
+    typeset packageName="$1"
+    typeset glassfishRootDir="$2"
+    typeset wasRootDir="$3"
+    typeset tomcatRootDir="$4"
+    typeset cleanupDir="$5"
+    
+    getLocalHostType "${packageName}"  "${glassfishRootDir}"   "${wasRootDir}"   "${tomcatRootDir}"  || return 1
+    typeset hostType=${RETURN[0]}
+    
+    typeset prefixPkgName=`echo "${packageName}" | awk -F'.' '{print $1}'`
+    typeset eachCleanupDir=""
+    for eachCleanupDir in `echo "${cleanupDir}" | tr -s "@" "  "`;do
+        if [ ! -d "${eachCleanupDir}" ];then
+            log_echo "info" "${func}" "The directory is not exists , dir is :[  ${eachCleanupDir}  ] , so need not to deal."
+            continue
+        fi
+        if [ "${eachCleanupDir}" = "/tmp/upgradeReadyToDelete" ];then
+            rm -rf /tmp/upgradeReadyToDelete/*
+            continue
+        fi
+        typeset sevenBeforeDayDate="`date -d "7 days ago" +"%Y%m%d"`"
+        cd "${eachCleanupDir}"
+        typeset readyToDeleteDirStr=`ls -A | awk -F'_' '{print $1}' | sort | uniq | awk -v sevenBeforeDayDate=$sevenBeforeDayDate '{if ($1<sevenBeforeDayDate) print $1}'`
+        typeset deleteStr=""
+        typeset eachDeleteDir=""
+        ####### like : 20150701  ######
+        for deleteStr in `echo "${readyToDeleteDirStr}"`;do
+            for eachDeleteDir in `ls -A ${eachCleanupDir} | grep "${deleteStr}"`;do
+                typeset oldDir="${eachCleanupDir}"/"${eachDeleteDir}"
+                if [ -d "${oldDir}" ];then
+                    rm -rf "${oldDir}"
+                    log_echo "delete ${oldDir} successed ..."
+                fi
+            done
+        done
+    done
+    log_echo "info" "Exit ${func} with successed."
+    return 0        
+}
+
+#### 串行回滚应用，通过mysql  #####
+rollbackSerialTomcatAppBySql()
+{
+    typeset func=rollbackSerialTomcatAppBySql
+    if [ $# -ne 7 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  rollbakBaseDir  expiretime  localserialfile  sysconfigfile  dbconfigfile  datets  theVersion    "
+        return 1
+    fi 
+    log_echo "info" "$func" "Enter $func with successed ."   
+    typeset rollbakBaseDir="$1"
+    typeset expiretime="$2"
+    typeset localserialfile="$3"
+    typeset sysconfigfile="$4"
+    typeset dbconfigfile="$5"
+    typeset datats="$6"
+    typeset theVersion="$7"
+    
+    checkFilesExists "${sysconfigfile}"  "${dbconfigfile}"  || return 1
+    . ${sysconfigfile}
+    . ${dbconfigfile}
+    
+    typeset sqlfile=${TEMP_DIR}/rollback_tmp.sql
+    typeset tmpfile=${TEMP_DIR}/rollback_tmp.tmp
+    
+    log_echo "info" "$func" "enter ${func} loop ..."
+    typeset beginTime=`date +%s`
+    while [ true ];do
+        #### get serial flag from database  ###
+        echo "select ip,rollback_flag from upgrade_record_table where begin_time='${datats}' order by id;" > ${sqlfile}
+        execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${localserialfile}"  || return 1
+        templinestr=`grep -n "^${localip}" ${localserialfile}`
+        if [ -z "${templinestr}" ];then
+            log_echo "error" "$func" "Get local ip : [  ${localip}   ] from file : [  ${localserialfile}   ] failed "
+            return 1
+        fi
+        templinenum=`echo "${templinestr}" | awk -F':' '{print $1}'`
+        tempflag=`echo "${templinestr}" | awk  '{print $2}'`
+        if [ ${templinenum} -eq 1 ];then
+            case "${tempflag}" in
+            "1")
+                log_echo "info" "$func" "First machine run rollback  .."
+                rollbackTomcatApp "${rollbakBaseDir}"  "${sysconfigfile}"   "${theVersion}"
+                if [ $? -ne 0 ];then
+                    log_echo "error" "$func" "Rollback failed ,so set rollback_flag : [ -1 ] with ip:[ ${localip}  ] , begin_time:[  ${datats}   ]"
+                    echo "update upgrade_record_table set rollback_flag=-1 where ip='${localip}' and begin_time='${datats}';" > ${sqlfile}
+                    execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${tmpfile}"  || return 1
+                    return 1
+                else
+                    log_echo "info" "$func" "Rollback successed ,so set rollback_flag : [ 2 ] with ip:[ ${localip}  ] , begin_time:[  ${datats}   ]"
+                    echo "update upgrade_record_table set rollback_flag=2 where ip='${localip}' and begin_time='${datats}';" > ${sqlfile}
+                    execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${tmpfile}"  || return 1
+                    log_echo "info" "$func" "Rollback successed , IP: [   ${localip}   ] ."
+                    return 0
+                fi
+            ;;
+            "-1")
+                log_echo "error" "$func" "Please check table : [  upgrade_record_table   ] [ rollback_flag ] value ,where  ip: [ ${localip}   ] and begin_time: [   ${datats}  ]"
+                return 1
+            ;;
+            "2")
+                log_echo "info" "$func" "Rollback successed , IP: [   ${localip}   ] ,so need not to rollback again ."
+                return 0
+            ;;
+            *)
+                log_echo "error" "$func" "Please check table : [  upgrade_record_table   ]  ,where  ip: [ ${localip}   ] and begin_time: [   ${datats}  ] rollback_flag value , this is a unknow value ,please check ."
+                return 1
+            ;;
+            esac
+        elif [ ${templinenum} -gt 1 ];then
+            ### 得到上一行的内容  ####
+            typeset uplinenum=`expr ${templinenum} - 1 `
+            typeset uplinestr=`sed -n ''"${uplinenum}"'p' ${localserialfile}`
+            typeset uplineip=`echo "${uplinestr}" | awk  '{print $1}'`
+            typeset uplineflag=`echo "${uplinestr}" | awk '{print $2}'`
+            case "${uplineflag}" in
+            "1"|"0")
+                log_echo "info" "$func" "Machine: [ ${uplineip}  ] is rollback , so wait .."
+                sleep 10
+                typeset currentTime=`date +%s`
+                typeset expenseTime=`expr ${currentTime} - ${beginTime}`
+                if [ "${expenseTime}" -gt "${expiretime}" ];then
+                    log_echo "error" "$func" "Expire time exec time:[ ${expenseTime} ]  more than :[ ${expiretime}  ]"
+                    return 1
+                fi
+                continue
+            ;;
+            "-1")
+                log_echo "error" "$func" "Machine:[ ${uplineip}   ] ,rollback failed ."
+                log_echo "error" "$func" "Please check table : [  upgrade_record_table   ] [ rollback_flag  ] ,where  ip: [ ${uplineip}   ] and begin_time: [   ${datats}  ]"
+                return 1
+            ;;
+            "2")
+                log_echo "info" "$func" "Machine : [  ${localip}   ] run rollback .."
+                rollbackTomcatApp "${rollbakBaseDir}"  "${sysconfigfile}"   "${theVersion}"
+                if [ $? -ne 0 ];then
+                    log_echo "error" "$func" "Rollback failed ,so set rollback_flag : [ -1 ] with ip:[ ${localip}  ] , begin_time:[  ${datats}   ]"
+                    echo "update upgrade_record_table set rollback_flag=-1 where ip='${localip}' and begin_time='${datats}';" > ${sqlfile}
+                    execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${tmpfile}"  || return 1
+                    return 1
+                else
+                    log_echo "info" "$func" "Rollback successed ,so set rollback_flag : [ 2 ] with ip:[ ${localip}  ] , begin_time:[  ${datats}   ]"
+                    echo "update upgrade_record_table set rollback_flag=2 where ip='${localip}' and begin_time='${datats}';" > ${sqlfile}
+                    execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${tmpfile}"  || return 1
+                    log_echo "info" "$func" "Rollback successed , IP: [   ${localip}   ] ."
+                    return 0
+                fi
+            ;;
+            *)
+                log_echo "error" "$func" "Please check table : [  upgrade_record_table   ] ,where  ip: [ ${localip}   ] and begin_time: [   ${datats}  ] rollback_flag value , this is a unknow value ,please check ."
+                return 1
+            ;;
+            esac
+        else
+            log_echo "error" "$func" "Get line num error , file : [  ${localserialfile}  ]  please check ."
+            return 1
+        fi
+    done
+    log_echo "info" "Exit ${func} with successed."
+    return 0   
+}
+
+
+####  串行回滚应用 通过SFTP  #########
+rollbackSerialTomcatAppBySftp()
+{
+    typeset func=rollbackSerialTomcatAppBySftp
+    if [ $# -ne 8 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  rollbakBaseDir  ExpireTime  localserialDir  remoteserialFileName  sysconfigFile  execScripSftpFile  sftpconfigfile  "
+        return 1
+    fi    
+    typeset rollbakBaseDir="$1"
+    typeset ExpireTime="$2"
+    typeset localserialDir="$3"
+    typeset remoteserialFileName="$4"
+    typeset sysconfigFile="$5"
+    typeset execScripSftpFile="$6"
+    typeset sftpconfigfile="$7"
+    typeset theVersion="$8"
+    
+    ### serial ####
+    typeset unkownStatus="unknow"
+    typeset failedStatus="failed"
+    typeset successedStatus="successed"
+    typeset firstLineIP=""
+    typeset firstStatus=""
+    typeset eachFile=""
+    typeset localserialFile="${localserialDir}/${remoteserialFileName}"
+    
+    #### check files   ######
+    for eachFile in  "${sysconfigFile}"  "${execScripSftpFile}"  "${sftpconfigfile}";do
+        checkFileExists "${eachFile}" || return 1
+        if [ ! -s "${eachFile}" ];then
+            log_echo "error" "$func" "File:[  ${eachFile}  ] is null ,please check,"
+            return 1
+        fi
+    done
+    . ${sysconfigFile}
+    . ${sftpconfigfile}
+    
+    log_echo "info" "$func" "enter ${func} loop ..."
+    typeset beginTime=`date +%s`
+    while [ true ];do
+        #### download file ###
+        rm -f ${localserialFile}
+        downloadFileFromSftpServer "${sftpconfigfile}"  "${SERIAL_FILE_DIR}/${remoteserialFileName}"  "${localserialDir}"  "${execScripSftpFile}" || return 1
+        firstLineIP="`head -1  ${localserialFile} | awk '{print $1}'`"
+        firstStatus="`head -1  ${localserialFile} | awk '{print $2}'`"
+        if [ -z "${firstLineIP}" -o -z "${firstStatus}" ];then
+            log_echo "error" "${func}" "Data error, please check file:[  ${localserialFile}  ]"
+            return 1
+        fi
+        #### first status failed ###
+        if [ "${firstStatus}" = "${failedStatus}" ];then
+            log_echo "error" "${func}" "Failed ,because IP:[  ${firstLineIP}  ] failed."
+            return 1
+        fi
+        
+        if [ "${firstLineIP}" == "${localip}" -a "${firstStatus}" == "${unkownStatus}" ];then
+            rollbackTomcatApp "${rollbakBaseDir}"  "${sysconfigFile}"   "${theVersion}"
+            if [ $? -ne 0 ];then
+                ### failed ###
+                sed -i 's/'"${firstLineIP}"'.*/'"${firstLineIP}"' '"${failedStatus}"'/'  "${localserialFile}"
+                if [ $? -ne 0 ];then
+                    log_echo "error" "${func}" "Command error, CMD=[  sed -i 's/'"${firstLineIP}"'.*/'"${firstLineIP}"' '"${failedStatus}"'/'  "${localserialFile}"  ] ."
+                    return 1
+                fi
+                return 1
+            else
+                ### successed ####
+                sed -i '/'"${firstLineIP}"'/d'  "${localserialFile}"
+                if [ $? -ne 0 ];then
+                    log_echo "error" "${func}" "Command error, CMD=[  sed -i '/'"${firstLineIP}"'.*/d'  "${localserialFile}"  ] ."
+                    return 1
+                fi            
+                echo "${firstLineIP} ${successedStatus}" >> ${localserialFile}
+                ### 上传到远程sftp 服务器端 #######
+                uploadSerialFileToSftpServer "${sftpconfigfile}"  "${localserialFile}"  "${execScripSftpFile}"  || return 1
+                return 0
+            fi
+        fi
+        sleep 10
+        typeset currentTime=`date +%s`
+        typeset expenseTime=`expr ${currentTime} - ${beginTime}`
+        if [ "${expenseTime}" -gt "${ExpireTime}" ];then
+            log_echo "error" "$func" "Expire time exec time:[ ${expenseTime} ]  more than :[ ${ExpireTime}  ]"
+            return 1
+        fi
+        log_echo "info" "$func" "Wait other machine run ..."
+    done
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0  
+}
+
+
+#########  retart app serial  by sql ########
+restartAppSerialBySql()
+{
+    typeset func=restartAppSerialBySql
+    if [ $# -ne 6 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  sysconfigfile  dbconfigfile  localserialfile  datets   tomcatStartExpireTime envtype "
+        return 1
+    fi    
+    log_echo "info" "$func" "Enter $func with successed ."
+    typeset sysconfigfile="$1"
+    typeset dbconfigfile="$2"
+    typeset localserialfile="$3"
+    typeset datats="$4"
+    typeset expiretime="$5"
+    typeset envtype="$6"
+
+    typeset sqlfile=${TEMP_DIR}/rollback_serial.sql
+    typeset tmpfile=${TEMP_DIR}/restart.tmp
+    typeset templinestr=""
+    typeset templinenum=""
+    typeset tempflag=""
+    
+    if [  "${envtype}" != "tomcat" ];then
+        log_echo "error" "$func" "Not support env type: [  ${envtype}   ] , please check ."
+        return 1
+    fi
+    #### check files exsits  ######
+    checkFilesExists  "${sysconfigfile}"  "${dbconfigfile}" || return 1
+    . ${sysconfigfile}
+    . ${dbconfigfile}
+
+    log_echo "info" "$func" "Enter ${func} loop ..."
+    typeset beginTime=`date +%s`
+    while [ true ];do
+        echo "select ip,restart_flag from upgrade_record_table where begin_time='${datats}' order by id;" > ${sqlfile}
+        execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${localserialfile}"  || return 1
+        templinestr=`grep -n "^${localip}" ${localserialfile}`
+        if [ -z "${templinestr}" ];then
+            log_echo "error" "$func" "Get local ip : [  ${localip}   ] from file : [  ${localserialfile}   ] failed "
+            return 1
+        fi
+        templinenum=`echo "${templinestr}" | awk -F':' '{print $1}'`
+        tempflag=`echo "${templinestr}" | awk  '{print $2}'`
+        if [ ${templinenum} -eq 1 ];then
+            case "${tempflag}" in
+            "1")
+                log_echo "info" "$func" "First machine run restart  .."
+                stopTomcatApp "${sysconfigfile}"  && startTomcatApp "${SYSTEM_CONFIG_FILE}"  "300"  "20" 
+                if [ $? -ne 0 ];then
+                    log_echo "error" "$func" "Restart failed ,so set restart_flag : [ -1 ] with ip:[ ${localip}  ] , begin_time:[  ${datats}   ]"
+                    echo "update upgrade_record_table set restart_flag=-1 where ip='${localip}' and begin_time='${datats}';" > ${sqlfile}
+                    execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${tmpfile}"  || return 1
+                    return 1
+                else
+                    log_echo "info" "$func" "Restart successed ,so set restart_flag : [ 2 ] with ip:[ ${localip}  ] , begin_time:[  ${datats}   ]"
+                    echo "update upgrade_record_table set restart_flag=2 where ip='${localip}' and begin_time='${datats}';" > ${sqlfile}
+                    execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${tmpfile}"  || return 1
+                    log_echo "info" "$func" "Restart successed , IP: [   ${localip}   ] ."
+                    return 0
+                fi
+            ;;
+            "-1")
+                log_echo "error" "$func" "Please check table : [  upgrade_record_table   ] ,where  ip: [ ${localip}   ] and begin_time: [   ${datats}  ]"
+                return 1
+            ;;
+            "2")
+                log_echo "info" "$func" "Restart successed , IP: [   ${localip}   ] ,so need not to restart again ."
+                return 0
+            ;;
+            *)
+                log_echo "error" "$func" "Please check table : [  upgrade_record_table   ] ,where  ip: [ ${localip}   ] and begin_time: [   ${datats}  ]  restart_flag value , this is a unknow value ,please check ."
+                return 1
+            ;;
+            esac
+        elif [ ${templinenum} -gt 1 ];then
+            ### 得到上一行的内容  ####
+            typeset uplinenum=`expr ${templinenum} - 1 `
+            typeset uplinestr=`sed -n ''"${uplinenum}"'p' ${localserialfile}`
+            typeset uplineip=`echo "${uplinestr}" | awk  '{print $1}'`
+            typeset uplineflag=`echo "${uplinestr}" | awk '{print $2}'`
+            case "${uplineflag}" in
+            "1"|"0")
+                log_echo "info" "$func" "Machine: [ ${uplineip}  ] is restart , so wait .."
+                sleep 10
+                typeset currentTime=`date +%s`
+                typeset expenseTime=`expr ${currentTime} - ${beginTime}`
+                if [ "${expenseTime}" -gt "${expiretime}" ];then
+                    log_echo "error" "$func" "Expire time exec time:[ ${expenseTime} ]  more than :[ ${expiretime}  ]"
+                    return 1
+                fi
+                continue
+            ;;
+            "-1")
+                log_echo "error" "$func" "Machine:[ ${uplineip}   ] ,restart failed ."
+                log_echo "error" "$func" "Please check table : [  upgrade_record_table   ] restart_flag ,where  ip: [ ${uplineip}   ] and begin_time: [   ${datats}  ]"
+                return 1
+            ;;
+            "2")
+                log_echo "info" "$func" "Machine : [  ${localip}   ] run restart .."
+                stopTomcatApp "${sysconfigfile}"  && startTomcatApp "${SYSTEM_CONFIG_FILE}"  "300"  "20" 
+                if [ $? -ne 0 ];then
+                    log_echo "error" "$func" "Restart failed ,so set restart_flag : [ -1 ] with ip:[ ${localip}  ] , begin_time:[  ${datats}   ]"
+                    echo "update upgrade_record_table set restart_flag=-1 where ip='${localip}' and begin_time='${datats}';" > ${sqlfile}
+                    execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${tmpfile}"  || return 1
+                    return 1
+                else
+                    log_echo "info" "$func" "Restart successed ,so set restart_flag : [ 2 ] with ip:[ ${localip}  ] , begin_time:[  ${datats}   ]"
+                    echo "update upgrade_record_table set restart_flag=2 where ip='${localip}' and begin_time='${datats}';" > ${sqlfile}
+                    execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${tmpfile}"  || return 1
+                    log_echo "info" "$func" "Restart successed , IP: [   ${localip}   ] ."
+                    return 0
+                fi
+            ;;
+            *)
+                log_echo "error" "$func" "Please check table : [  upgrade_record_table   ] ,where  ip: [ ${localip}   ] and begin_time: [   ${datats}  ] restart_flag value , this is a unknow value ,please check ."
+                return 1
+            ;;
+            esac
+        else
+            log_echo "error" "$func" "Get line num error , file : [  ${localserialfile}  ]  please check ."
+            return 1
+        fi
+    done
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0  
+}
+
+deleteBeforeBackupDm()
+{
+    typeset func=deleteBeforeBackupDm
+    if [ $# -ne 2 ];then
+        log_echo "error" "$func" "Usage ${func}: backupDir  backupTimeFactor  "
+        log_echo "error" "$func" "Usage ${func}: /wasbackup/dmbackup  20150614_0300_1434222002  "
+        return 1
+    fi
+    typeset backupBaseDir="$1"
+    typeset backupTimeFactor="$2"
+    
+    getLocalIp  || return 1
+    typeset localIpadd="`echo "${RETURN[0]}" | head -1`"    
+    
+    typeset tmpFile=/tmp/${func}.tmp
+    typeset tmpFile2=/tmp/${func}_2.tmp
+    >${tmpFile}
+    >${tmpFile2}
+    
+    cd ${backupBaseDir} && ls -A > ${tmpFile}
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Command error,CMD=[    cd ${backupBaseDir} && ls -A      ]"
+        return 1
+    fi
+    if [ ! -s "${tmpFile}" ];then
+        log_echo "error" "$func" "File is emputy,please check, file:[  ${tmpFile}   ]"
+        return 1
+    fi
+    grep "201[0-9]\{5\}_[0-9]\{4\}_[0-9]\{8\}.*" ${tmpFile} | grep -v "${backupTimeFactor}" >${tmpFile2}
+    
+    typeset eachdir=""
+    if [ -s "${tmpFile2}" ];then
+        cat "${tmpFile2}" | while read line
+        do
+            typeset beforedire="${backupBaseDir}/${line}/${localIpadd}"
+            if [ -d "${beforedire}" ];then
+                rm -rf   "${beforedire}"
+            fi
+            
+            typeset tmpStr=`ls "${backupBaseDir}/${line}"`
+            if [ -z "${tmpStr}" ];then
+                rm -rf "${backupBaseDir}/${line}"
+            fi
+        done
+    else
+        log_echo "info" "$func" "Delete directory is emputy.so need not deal"
+    fi    
+    rm -f ${tmpFile} ${tmpFile2}
+    
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0    
+}
+
+
+backupWasAllv2()
+{
+    typeset func="backupWasAllv2"
+    typeset backupDir="$1"
+    typeset wasDir="$2"
+    
+    typeset tmpFile=/tmp/${func}_bak.list 
+    
+    checkDirExists  "${backupDir}"  || return 1
+    > "${tmpFile}"
+    
+    typeset mutiFlag=`echo "${wasDir}" | grep "@"`
+    if [ ! -z "${mutiFlag}" ];then
+        wasDir="`echo "${wasDir}" | sed 's/@/ /g'`"
+    fi
+    typeset eachDir=""
+    for eachDir in `echo "${wasDir}"`
+    do
+        checkDirExists  "${eachDir}"  || return 1
+    done    
+    
+    find ${wasDir} |  grep -Ev "/logs/|.log|/temp/|/wstemp/|/java_pid.*.hprof"  > "${tmpFile}"
+    
+    if [ ! -s "${tmpFile}" ];then
+        log_echo "error" "$func" "Can not find file in wasDir:[  ${wasDir}  ]"
+        return 1
+    fi
+    
+    log_echo "info" "$func" "Backup is running ..."
+    typeset loopFlag=0
+    cat "${tmpFile}" | while read line
+    do
+        #### file or dir ???  ##
+        if [ -d "${line}" ];then
+            mkdir -p "${backupDir}"/"${line}"
+            if [ $? -ne 0 ];then
+                log_echo "error" "$func" "Command error , CMD = [  mkdir -p "${backupDir}"/"${line}"    ]"
+                loopFlag=1
+                break
+            fi
+        elif [ -f "${line}" ];then
+            cp -f "${line}"   "${backupDir}"/"${line}"
+            if [ $? -ne 0 ];then
+                log_echo "error" "$func" "Command error , CMD = [  cp -f "${line}"   "${backupDir}"/"${line}"    ]"
+                continue
+            fi
+        elif [ -L "${line}" ];then
+            cp -rf "${line}"   "${backupDir}"/"${line}"
+            if [ $? -ne 0 ];then
+                log_echo "error" "$func" "Command error , CMD = [  cp -rf "${line}"   "${backupDir}"/"${line}"    ]"
+                continue
+            fi
+        fi
+    done    
+    
+    if [ "${loopFlag}" -ne 0 ];then
+        log_echo "info" "$func" "Backup failed. please check!."
+        return 1
+    fi
+    
+    log_echo "info" "$func" "Backup successed."
+    return 0    
+}
+
+####  delete other timefactor directory except $2 timefactor ###
+deleteBeforeBackupD01()
+{
+    typeset func=deleteBeforeBackupD01
+    if [ $# -ne 3 ];then
+        log_echo "error" "$func" "Usage ${func}: backupDir backupTimeFactor d01bak.tar.gz "
+        log_echo "error" "$func" "Usage ${func}: /wasbackup/d01backup  20150614_0300_1434222002  d01bak.tar.gz"
+        return 1
+    fi
+    typeset backupBaseDir="$1"
+    typeset backupTimeFactor="$2"
+    typeset backupFileName="$3"
+    
+    getLocalIp  || return 1
+    typeset localIpadd="`echo "${RETURN[0]}" | head -1`"    
+    
+    typeset tmpFile=/tmp/${func}.tmp
+    typeset tmpFile2=/tmp/${func}_2.tmp
+    >${tmpFile}
+    >${tmpFile2}
+    
+    cd ${backupBaseDir} && ls -A > ${tmpFile}
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Command error,CMD=[    cd ${backupBaseDir} && ls -A      ]"
+        return 1
+    fi
+    if [ ! -s "${tmpFile}" ];then
+        log_echo "error" "$func" "File is emputy,please check, file:[  ${tmpFile}   ]"
+        return 1
+    fi
+    grep "201[0-9]\{5\}_[0-9]\{4\}_[0-9]\{8\}.*" ${tmpFile} | grep -v "${backupTimeFactor}" >${tmpFile2}
+    
+    typeset eachdir=""
+    if [ -s "${tmpFile2}" ];then
+        cat "${tmpFile2}" | while read line
+        do
+            typeset beforeBakFile="${backupBaseDir}/${line}/${localIpadd}/${backupFileName}"
+            if [ -f "${beforeBakFile}" ];then
+                rm -f "${beforeBakFile}"
+            fi
+            for eachdir in "${backupBaseDir}/${line}/${localIpadd}"  "${backupBaseDir}/${line}"
+            do
+                typeset tmpStr=`ls "${eachdir}"`
+                if [ -z "${tmpStr}" ];then
+                    rm -rf "${eachdir}"
+                fi
+            done
+        done
+    else
+        log_echo "info" "$func" "Delete directory is emputy.so need not deal"
+    fi
+    rm -f ${tmpFile} ${tmpFile2}
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0    
+}
+
+#########  asert url can open  ############
+canOpenUrl()
+{
+    typeset func="canOpenUrl"
+    typeset URL="$1"
+
+    which curl 1>/dev/null 2>&1
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Can not find curl command."
+        return 1
+    fi
+
+    typeset retCode=`curl -o /dev/null -s -w "%{http_code}" --max-time 5 "${URL}"`
+    if [  "${retCode}" = "000" -o "${retCode}" -ge "400" ];then
+        return 2
+    fi
+    #log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0
+}
+
+######## check file exists ######
+checkFileExists()
+{
+    typeset func=checkFileExists
+    if [ $# -ne 1 ];then
+        log_echo "error" "$func" "Parameter error . useage : $func file"
+        return 1
+    fi 
+    typeset thefile="$1"
+    if [ ! -f "${thefile}" ];then
+        log_echo "error" "$func" "The file :[ ${thefile} ] is not exists, please check"
+        return 1
+    fi    
+    #log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0    
+}
+
+######## check files exists ######
+checkFilesExists()
+{
+    typeset func=checkFileExists
+    if [ $# -lt 1 ];then
+        log_echo "error" "$func" "Parameter error . useage : $func file1 file2 ... "
+        return 1
+    fi 
+    typeset eachfile=""
+    for eachFile in $*;do
+        if [ ! -f "${eachFile}" ];then
+            log_echo "error" "$func" "The file :[  ${eachFile}  ] is not exists, please check"
+            return 1
+        fi    
+    done
+    #log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0    
+}
+
+######## check user exists ######
+checkUserExists()
+{
+    typeset func=checkUserExists
+    if [ $# -ne 1 ];then
+        log_echo "error" "$func" "Parameter error . useage : $func theuser"
+        return 1
+    fi 
+    typeset theuser="$1"
+    typeset passwdFile=/etc/passwd   
+    typeset retStr=`grep "^${theuser}:" ${passwdFile}`
+    if [ -z "${retStr}" ];then
+        log_echo "error" "$func" "The user :[ ${theuser} ] is not exists, please check"
+        return 1
+    fi    
+    #log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0    
+}
+
+############ check directory exists  ##########
+checkDirExists()
+{
+    typeset func=checkDirExists
+    if [ $# -ne 1 ];then
+        log_echo "error" "${func}" "Parameter error ${func} directory."    
+        return 1
+    fi
+    typeset checkDir="$1"
+    if [ ! -d "${checkDir}" ];then
+        log_echo "error" "${func}" "Directory :[ ${checkDir} ] is not exists,please check."    
+        return 1
+    fi
+    #log_echo "info" "${func}" "Exit func ${func} with succesed."    
+    return 0 
+}
+
+######## start tomcat if not start #########
+startTomcatApp()
+{
+    typeset func=startTomcatApp
+    if [ $# -ne 3 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}   sysconfigfile  execTimeOut   sleepTime  "
+        log_echo "error" "${func}" "Parameter error usage : ${func}   sysconfig.conf  300   20  "
+        return 1
+    fi
+    typeset sysconfigfile="$1"
+    typeset execTimeOut="$2"
+    typeset sleepTime="$3"
+    typeset eachpkgname=""
+    typeset eachuser=""
+    typeset eachtomcatdir=""
+    typeset eachurl=""
+    typeset i=1
+    typeset userNum=0
+    typeset processNum=0
+    typeset userprocessesids=""
+    typeset processesnum=""
+    
+    checkFileExists "${sysconfigfile}"  || return 1
+    . ${sysconfigfile}
+    
+    userNum=`echo ${#user[@]}`
+    if [ ${userNum} -eq 0 ];then
+        log_echo "error" "${func}" "User number is error ,please check file : [  ${sysconfigfile}     ]"
+        return 1
+    fi
+    for i in `seq $userNum`;do
+        eval eachpkgname=${pkgname[$i]}
+        eval eachuser=${user[$i]}
+        eval eachtomcatdir=${tomcatdir[$i]}
+        eval eachurl=${url[$i]}
+        typeset logfile=${eachtomcatdir}/logs/catalina.out
+        
+        ### check tomcat is started ?  ###
+        getUserJavaProcessesId  "{eachuser}"
+        userprocessesids="${RETURN[0]}"
+        processesnum=`echo "${userprocessesids}" | awk '{print $NF}'`
+        if [  "${processesnum}"  -ge 2 ];then
+            log_echo "warn" "$func" "Found two or more processes user: [ ${eachuser}  ] processes id : [ ${userprocessesids}  ], so exist . "
+            return 0
+        elif [  "${processesnum}"  -eq 1 ];then
+            log_echo "info" "$func" "Found a processes with user: [ ${eachuser}  ] processes id : [ ${userprocessesids}  ] is running . "
+            return 0
+        else
+            if [ "${eachuser}" != "root" ];then
+                su - ${eachuser} -c "${eachtomcatdir}/bin/startup.sh"
+            else
+                ${eachtomcatdir}/bin/startup.sh
+            fi
+            if [ $? -ne 0 ];then
+                log_echo "error" "${func}" "Exec command error , CMD = [  su - ${eachuser} -c "${eachtomcatdir}/bin/startup.sh" ]   or [   ${eachtomcatdir}/bin/shutdown.sh  ]"
+                return 1
+            fi
+            checkUrlCanOpen  "${eachurl}"  "${logfile}"  "${execTimeOut}"  "${sleepTime}" || return 1    
+            log_echo "info" "$func" "Started  pkg: [  ${eachpkgname}   ],tomcat dir: [  ${eachtomcatdir}  ] with user : [    ${eachuser}   ] ."
+        fi
+    done
+    log_echo "info" "Exit func ${func} with successed."
+    return 0
+}
+
+#####   检查 url 是否可以打开  ####
+checkUrlCanOpen()
+{
+    typeset func=checkUrlCanOpen
+    if [ $# -ne 4 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  url  logfile  execTimeOut  sleeptime"
+        return 1
+    fi
+    typeset url="$1"
+    typeset logfile="$2"
+    typeset execTimeOut="$3"
+    typeset sleeptime="$4"
+    
+    log_echo "info" "$func" "Enter check server url : [  ${url}  ] loop ..."
+    typeset beginTime=`date +%s`
+    while [ TRUE ] ;do
+        canOpenUrl "${url}"
+        if [ $? -eq 0 ];then
+            log_echo "info" "$func" "Start successed , url : [  ${url}   ] ,log file: [  ${logfile}   ] ..."
+            break
+        fi
+        typeset currentTime=`date +%s`
+        typeset expenseTime=`expr ${currentTime} - ${beginTime}`
+        if [ "${expenseTime}" -gt "${execTimeOut}" ];then
+            log_echo "error" "$func" "Time out ..set time is ${execTimeOut} but expense time is ${expenseTime} "
+            log_echo "error" "$func" "Please check log file:[  ${logfile}  ]"
+            log_echo "error" "$func" "Use command:[  tail -100f  ${logfile}    ] to show more error log ..."            
+            return 1
+        fi
+        sleep ${sleeptime}
+    done
+    log_echo "info" "Exit ${func} with successed."
+    return 0
+}
+
+########  backup tomcat app #########
+backupTomcatApp()
+{
+    typeset func=backupTomcatApp
+    if [ $# -ne 3 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func} backupBaseDir  packageName  sysconfigfile "
+        return 1
+    fi
+    log_echo "info" "$func" "Exit  ${func} with successed."
+
+    typeset backupBaseDir="$1"
+    typeset pkgname="$2"
+    typeset sysconfigfile="$3"
+    
+    typeset eachpkgname=""
+    typeset eachuser=""
+    typeset eachtomcatdir=""
+    typeset eachconfigfile=""
+    typeset configfile=""
+
+    
+    . ${sysconfigfile}
+    typeset userNum=`echo ${#user[@]}`
+    if [ ${userNum} -eq 0 ];then
+        log_echo "error" "${func}" "User number is error ,please check file : [  ${sysconfigfile}     ]"
+        return 1
+    fi
+    for i in `seq $userNum`;do
+        eval eachpkgname=${pkgname[$i]}
+        eval eachuser=${user[$i]}
+        eval eachtomcatdir=${tomcatdir[$i]}
+        eval eachconfigfile=${tomcatconfigfile[$i]}
+        typeset prefixPkgName=`echo "${eachpkgname}" | awk -F'.' '{print $1}'`
+        typeset tomcatpkgdir="${eachtomcatdir}/webapps/${prefixPkgName}"
+        
+        log_echo "info" "$func" "Backup each config file is right."
+        configfile="${CONFIG_DIR}/${eachconfigfile}"
+        #### 读取配置文件 并且一一进行备份  #####
+        while read eachitem;do
+            typeset pathconfigfile="${tomcatpkgdir}/${eachitem}"
+            typeset configfilefullpath="`dirname ${pathconfigfile}`"
+            typeset backupconfigdir="`dirname ${backupBaseDir}`/${configfilefullpath}"
+            if [ "${eachuser}" != "root" ];then
+                su - ${eachuser} -c "mkdir -p ${backupconfigdir}  &&  cp -f ${pathconfigfile}  ${backupconfigdir}"
+            else
+                mkdir -p "${backupconfigdir}"  &&  cp -f "${pathconfigfile}"  "${backupconfigdir}"            
+            fi
+            if [ $? -ne 0 ];then
+                log_echo "error" "$func" "Backup config file failed , CMD = [   su - ${eachuser} -c "mkdir -p ${backupconfigdir}  &&  cp -f ${pathconfigfile}  ${backupconfigdir}"      ]  or  [     mkdir -p "${backupconfigdir}"  &&  cp -f "${pathconfigfile}"  "${backupconfigdir}"       ] " 
+                return 1
+            fi
+            log_echo "info" "$func" "Backup file : [    ${pathconfigfile}     ] to dir : [   ${backupconfigdir}   ] successed ."
+        done < ${configfile}
+        log_echo "info" "$func" "Backup config file successed . going to backup all files." 
+        
+        typeset backupDir=${backupBaseDir}/${eachtomcatdir}/webapps
+        log_echo "info" "$func" "Backup package :[   ${eachpkgname}   ] to file :[  ${backupDir}/${pkgname}.tar.gz  ] is running ,please wait..."
+        mkdir -p ${backupDir} && cd ${eachtomcatdir}/webapps &&  tar -zcf ${backupDir}/${eachpkgname}.tar.gz ${prefixPkgName}
+        if [ $? -ne 0 ];then
+            log_echo "error" "${func}" "Backup failed . CMD = [    mkdir -p ${backupDir} && cd ${eachtomcatdir}/webapps &&  tar -zcf ${backupDir}/${eachpkgname}.tar.gz ${prefixPkgName}       ]"
+            return 1
+        fi 
+    done
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0    
+}
+
+#########  rollback  app  ########
+rollbackTomcatApp()
+{   
+    typeset func=rollbackTomcatApp
+    if [ $# -ne 3 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func} rollbakBaseDir  sysconfigfile   theVersion"
+        return 1
+    fi
+    typeset rollbakBaseDir="$1"
+    typeset sysconfigfile="$2"
+    typeset theVersion="$3"
+    typeset eachpkgname=""
+    typeset eachuser=""
+    typeset eachtomcatdir=""
+    typeset i=1
+    typeset userNum=0
+    
+    checkDirExists  "${rollbakBaseDir}"  || return 1
+    if [ "${theVersion}" = "none" ];then
+        ##### get laterest directory #######
+        typeset laterestVersion=`ls -lrt "${rollbakBaseDir}" | grep "[0-9]\{8\}_[0-9]\{4\}.*" | tail -1 | awk '{print $9}'`
+        if [ -z "${laterestVersion}" ];then
+            log_echo "error" "${func}" "Not find laterest version directory,please check directory:${rollbakBaseDir} is right."
+            return 1
+        fi
+        typeset rollbakBaseDir="${rollbakBaseDir}/${laterestVersion}"
+    else
+        typeset rollbakBaseDir="${rollbakBaseDir}/${theVersion}"
+    fi
+    stopTomcatApp "${sysconfigfile}" || return 1
+    . ${sysconfigfile}
+    userNum=`echo ${#user[@]}`
+    if [ ${userNum} -eq 0 ];then
+        log_echo "error" "${func}" "User number is error ,please check file : [  ${sysconfigfile}     ]"
+        return 1
+    fi
+    for i in `seq $userNum`;do
+        eval eachpkgname=${pkgname[$i]}
+        eval eachuser=${user[$i]}
+        eval eachtomcatdir=${tomcatdir[$i]}
+        typeset prefixPkgName=`echo "${eachpkgname}" | awk -F'.' '{print $1}'`
+        typeset tomcatwebappsdir="${eachtomcatdir}/webapps"
+        ${rollbakBaseDir}/${tomcatwebappsdir}/${eachpkgname}.tar.gz
+
+        checkFileExists "${rollbakBaseDir}/${tomcatwebappsdir}/${eachpkgname}.tar.gz" || return 1
+        if [ "${eachuser}" != "root" ];then
+            su - ${eachuser} -c "rm -f ${tomcatwebappsdir}/${eachpkgname}  && rm -r ${tomcatwebappsdir}/${prefixPkgName} && cd ${tomcatwebappsdir} && tar -zxf ${rollbakBaseDir}/${tomcatwebappsdir}/${eachpkgname}.tar.gz"
+        else
+            rm -f ${tomcatwebappsdir}/${eachpkgname}  && rm -r ${tomcatwebappsdir}/${prefixPkgName} && cd ${tomcatwebappsdir} && tar -zxf ${rollbakBaseDir}/${tomcatwebappsdir}/${eachpkgname}.tar.gz
+        fi
+        if [ $? -ne 0 ];then
+            log_echo "error" "${func}" "Upgrade failed , CMD = [ su - ${eachuser} -c "rm -f ${tomcatwebappsdir}/${eachpkgname}  && rm -r ${tomcatwebappsdir}/${prefixPkgName} && cd ${tomcatwebappsdir} && tar -zxf ${rollbakBaseDir}/${tomcatwebappsdir}/${eachpkgname}.tar.gz"  ] or  [      rm -f ${tomcatwebappsdir}/${eachpkgname}  && rm -r ${tomcatwebappsdir}/${prefixPkgName} && cd ${tomcatwebappsdir} && tar -zxf ${rollbakBaseDir}/${tomcatwebappsdir}/${eachpkgname}.tar.gz  ]"
+            return 1
+        fi
+        log_echo "info" "$func" "Upgrade [  ${eachpkgname}   ],tomcat dir: [  ${tomcatwebappsdir}  ] with user : [    ${eachuser}   ] successed ."
+    done
+    startTomcatApp "${sysconfigfile}"  "300"  "20"  || return 1
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0    
+}
+
+########## cleanup nginx apache expie log file #######
+cleanupNginxApacheExpireLog()
+{
+    typeset func=cleanupNginxApacheExpireLog
+    if [ $# -ne 1 ];then
+        log_echo "error" "${func}" "Parameter error , usage : ${func} theExpireDay "
+        log_echo "error" "${func}" "like : ${func} 7  "
+        return 1
+    fi        
+    typeset theExpireDay="$1"
+    
+    getHostApacheNginx
+    typeset hostTP="${RETURN[0]}"
+    #log_echo "3333333333 hostTP : $hostTP"
+    typeset cleanupDir=""
+    case "${hostTP}" in
+      apache)
+        cleanupDir="/etc/httpd/logs"
+     ;; 
+      nginx)
+        getNginxLogDir || return 1
+        cleanupDir="${RETURN[0]}"
+     ;; 
+      apache_nginx)
+        RETURN[0]=""
+        getNginxLogDir
+        cleanupDir="${RETURN[0]} /etc/httpd/logs"
+     ;; 
+      unknow)
+        log_echo "error" "$func" "Unknow host type not nginx and apache,please check ."
+        return 1
+     ;;                
+      *)
+        log_echo "error" "$func" "Parameter error ."
+        return 1      
+     ;;
+    esac      
+    #log_echo "888888888888 cleanupDir : $cleanupDir"
+    #### check dir exist  ###
+    typeset eachDir=""
+    for eachDir in `echo "${cleanupDir}"`;do
+        checkDirExists "${eachDir}"  || return 1
+    done
+    
+    find ${cleanupDir}/ -maxdepth 1 -type f -atime +${theExpireDay} -name "*log*" | xargs rm -f
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0     
+}
+
+####  get Nginx Log Directory  return a array ####
+getNginxLogDir()
+{
+    typeset func=getNginxLogDir
+    getNginxConfigFile || return 1
+    typeset ngcFile="${RETURN[0]}"
+    typeset tmpFile=/tmp/${getNginxLogDir}.tmp
+    typeset tmpLogFiles="`grep "access_log" ${ngcFile} | grep -v "\#" | awk '{print $2}'`"
+    if [ -z "${tmpLogFiles}" ];then
+        log_echo "info" "$func" "Not config config file:[  ${ngcFile}  ] ."
+        RETURN[0]="/usr/local/nginx/logs"
+        return 0
+    fi
+    typeset eachLogFile=""
+    > ${tmpFile}
+    typeset tStr=""
+    for eachLogFile in `echo "${tmpLogFiles}"`;do
+        tStr=`dirname "${eachLogFile}"`
+        if [ "${tStr}" = "logs" ];then
+            tStr="/usr/local/nginx/logs"
+        fi
+        echo "${tStr}" >> ${tmpFile}
+    done
+    
+    RETURN[0]=`cat "${tmpFile}" | sort -u | uniq`
+    rm -f ${tmpFile}
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0 
+}
+
+###  get nginx config file ########
+getNginxConfigFile()
+{
+    typeset func=getNginxConfigFile
+    RETURN[0]="`ps -ef | grep "nginx" | grep "master" | awk '{print $NF}'`"
+    if [ -z "${RETURN[0]}" ];then
+        log_echo "error" "$func" "Can not get nginx config file,please check nginx is running."
+        return 1            
+    fi
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0   
+}
+
+#########  get host type is apache nginx  apache_nginx  unknow   #######
+getHostApacheNginx()
+{
+    typeset func=getHostApacheNginx
+    RETURN[0]=""
+    ###### nginx must be install "/usr/bin/nginx"  and "ps -ef | grep nginx" #####
+    ##### apache host must be service httpd status is running #####
+    isApacheHost
+    typeset tmpAPaHT="${RETURN[0]}"
+    #log_echo "11111111111 isApacheHost:$tmpAPaHT"
+    isNginxHost
+    typeset tmpNgHT="${RETURN[0]}"
+    #log_echo "22222222222 isNginxHost:$tmpNgHT"
+    
+    if [ "${tmpAPaHT}" = "Yes" -a "${tmpNgHT}" = "No" ];then
+        RETURN[0]="apache"
+    elif [ "${tmpAPaHT}" = "No" -a "${tmpNgHT}" = "Yes" ];then
+        RETURN[0]="nginx"
+    elif [ "${tmpAPaHT}" = "Yes" -a "${tmpNgHT}" = "Yes" ];then
+        RETURN[0]="apache_nginx"
+    else
+        RETURN[0]="unknow"
+    fi
+    
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0  
+}
+
+######## isApacheHost return Yes/No  #########
+isApacheHost()
+{
+    typeset func=isApacheHost
+    RETURN[0]=""
+    ##### apache host must be service httpd status is running #####
+    typeset tmpstr=`service httpd status | grep -c "running"`
+    if [ ${tmpstr} -gt 0 ];then
+        RETURN[0]="Yes"
+    else
+        RETURN[0]="No"
+    fi
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0 
+}
+
+#########  isNginxHost  return Yes/No   #########
+isNginxHost()
+{
+    typeset func=isNginxHost
+    RETURN[0]=""
+    typeset tmpstr=""
+    tmpstr="`ps -ef | grep nginx | grep master | grep -v grep`"
+    #log_echo "99999999999999999999999999999tmpstr:$tmpstr"
+    if [ -z "${tmpstr}" ];then
+        RETURN[0]="No"
+    else
+        RETURN[0]="Yes"
+    fi
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0 
+}
+
+#######  upgrade app serial  by sql  #####
+upgradeAppSerialBySql()
+{
+    typeset func=upgradeAppSerialBySql
+    if [ $# -ne 8 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func} packageFile  dbconfigfile  expiretime  localserialfile  sysconfigFile  backupBaseDir envtype "
+        return 1
+    fi
+    log_echo "info" "${func}" "Enter ${func} with successed."
+    typeset packageFile="$1"
+    typeset dbconfigfile="$2"
+    typeset expiretime="$3"
+    typeset localserialfile="$4"
+    typeset sysconfigFile="$5"
+    typeset datats="$6"
+    typeset backupBaseDir="$7"
+    typeset envtype="$8"
+    
+    typeset sqlfile=${TEMP_DIR}/upgrade_serial.sql
+    typeset tmpfile=${TEMP_DIR}/insert.tmp
+    typeset templinestr=""
+    typeset templinenum=""
+    typeset tempflag=""
+    
+    if [  "${envtype}" != "tomcat" ];then
+        log_echo "error" "$func" "Not support env type: [  ${envtype}   ],please check ."
+        return 1
+    fi
+    #### check files exsits  ######
+    checkFilesExists "${packageFile}"  "${sysconfigFile}"  "${dbconfigfile}" || return 1
+    . ${sysconfigFile}
+    . ${dbconfigfile}
+
+    log_echo "info" "$func" "enter ${func} loop ..."
+    typeset beginTime=`date +%s`
+    while [ true ];do
+        #### get serial flag from database  ###
+        rm -f ${localserialfile}
+        echo "select ip,upgrade_flag from upgrade_record_table where begin_time='${datats}' order by id;" > ${sqlfile}
+        execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${localserialfile}"  || return 1
+        templinestr=`grep -n "^${localip}" ${localserialfile}`
+        if [ -z "${templinestr}" ];then
+            log_echo "error" "$func" "Get local ip : [  ${localip}   ] from file : [  ${localserialfile}   ] failed "
+            return 1
+        fi
+        templinenum=`echo "${templinestr}" | awk -F':' '{print $1}'`
+        tempflag=`echo "${templinestr}" | awk  '{print $2}'`
+        if [ ${templinenum} -eq 1 ];then
+            case "${tempflag}" in
+            "1")
+                log_echo "info" "$func" "First machine run upgrade .."
+                upgradeApp "${packageFile}"  "${sysconfigFile}"  "${backupBaseDir}"   "${envtype}"
+                if [ $? -ne 0 ];then
+                    log_echo "error" "$func" "Upgrade failed ,so set upgrade_flag : [ -1 ] with ip:[ ${localip}  ] , begin_time:[  ${datats}   ]"
+                    echo "update upgrade_record_table set upgrade_flag=-1 where ip='${localip}' and begin_time='${datats}';" > ${sqlfile}
+                    execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${tmpfile}"  || return 1
+                    return 1
+                else
+                    log_echo "info" "$func" "Upgrade successed ,so set upgrade_flag : [ 2 ] with ip:[ ${localip}  ] , begin_time:[  ${datats}   ]"
+                    echo "update upgrade_record_table set upgrade_flag=2 where ip='${localip}' and begin_time='${datats}';" > ${sqlfile}
+                    execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${tmpfile}"  || return 1
+                    log_echo "info" "$func" "Upgrade successed , IP: [   ${localip}   ] ."
+                    return 0
+                fi
+            ;;
+            "-1")
+                log_echo "error" "$func" "Please check table : [  upgrade_record_table   ] ,where  ip: [ ${localip}   ] and begin_time: [   ${datats}  ]"
+                return 1
+            ;;
+            "2")
+                log_echo "info" "$func" "Upgrade successed , IP: [   ${localip}   ] ,so need not to upgrade again ."
+                return 0
+            ;;
+            *)
+                log_echo "error" "$func" "Please check table : [  upgrade_record_table   ] ,where  ip: [ ${localip}   ] and begin_time: [   ${datats}  ] upgrade_flag value , this is a unknow value ,please check ."
+                return 1
+            ;;
+            esac
+        elif [ ${templinenum} -gt 1 ];then
+            ### 得到上一行的内容  ####
+            typeset uplinenum=`expr ${templinenum} - 1 `
+            typeset uplinestr=`sed -n ''"${uplinenum}"'p' ${localserialfile}`
+            typeset uplineip=`echo "${uplinestr}" | awk  '{print $1}'`
+            typeset uplineupgradeflag=`echo "${uplinestr}" | awk '{print $2}'`
+            case "${uplineupgradeflag}" in
+            "1"|"0")
+                log_echo "info" "$func" "Machine: [ ${uplineip}  ] is upgrade , so wait .."
+                sleep 10
+                typeset currentTime=`date +%s`
+                typeset expenseTime=`expr ${currentTime} - ${beginTime}`
+                if [ "${expenseTime}" -gt "${expiretime}" ];then
+                    log_echo "error" "$func" "Expire time exec time:[ ${expenseTime} ]  more than :[ ${expiretime}  ]"
+                    return 1
+                fi
+                continue
+            ;;
+            "-1")
+                log_echo "error" "$func" "Machine:[ ${uplineip}   ] ,upgrade failed ."
+                log_echo "error" "$func" "Please check table : [  upgrade_record_table   ] ,where  ip: [ ${uplineip}   ] and begin_time: [   ${datats}  ]"
+                return 1
+            ;;
+            "2")
+                log_echo "info" "$func" "Machine : [  ${localip}   ] run upgrade .."
+                upgradeApp "${packageFile}"  "${sysconfigFile}"  "${backupBaseDir}"   "${envtype}"
+                if [ $? -ne 0 ];then
+                    log_echo "error" "$func" "Upgrade failed ,so set upgrade_flag : [ -1 ] with ip:[ ${localip}  ] , begin_time:[  ${datats}   ]"
+                    echo "update upgrade_record_table set upgrade_flag=-1 where ip='${localip}' and begin_time='${datats}';" > ${sqlfile}
+                    execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${tmpfile}"  || return 1
+                    return 1
+                else
+                    log_echo "info" "$func" "Upgrade successed ,so set upgrade_flag : [ 2 ] with ip:[ ${localip}  ] , begin_time:[  ${datats}   ]"
+                    echo "update upgrade_record_table set upgrade_flag=2 where ip='${localip}' and begin_time='${datats}';" > ${sqlfile}
+                    execSqlToFile "${dbconfigfile}"  "${sqlfile}"  "${tmpfile}"  || return 1
+                    log_echo "info" "$func" "Upgrade successed , IP: [   ${localip}   ] ."
+                    return 0
+                fi
+            ;;
+            *)
+                log_echo "error" "$func" "Please check table : [  upgrade_record_table   ] ,where  ip: [ ${localip}   ] and begin_time: [   ${datats}  ] upgrade_flag value , this is a unknow value ,please check ."
+                return 1
+            ;;
+            esac
+        else
+            log_echo "error" "$func" "Get line num error , file : [  ${localserialfile}  ]  please check ."
+            return 1
+        fi
+    done
+    log_echo "info" "${func}" "Exit ${func} with successed."
+    return 0 
+}
+
+#######  upgrade app serial  第二版程序废弃 #####
+upgradeAppSerialBySftp()
+{
+    typeset func=upgradeAppSerialBySftp
+    if [ $# -ne 9 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  ExpireTime  localserialFile  sysconfigFile  execScripSftpFile  sftpconfigfile  envtype "
+        return 1
+    fi    
+    typeset packageFile="$1"
+    typeset ExpireTime="$2"
+    typeset localserialDir="$3"
+    typeset remoteserialFileName="$4"
+    typeset sysconfigFile="$5"
+    typeset execScripSftpFile="$6"
+    typeset sftpconfigfile="$7"
+    typeset backupBaseDir="$8"
+    typeset envtype="$9" 
+    
+    ### serial ####
+    typeset unkownStatus="unknow"
+    typeset failedStatus="failed"
+    typeset successedStatus="successed"
+    typeset firstLineIP=""
+    typeset firstStatus=""
+    typeset eachFile=""
+    typeset localserialFile="${localserialDir}/${remoteserialFileName}"
+    
+    if [  "${envtype}" != "tomcat" ];then
+        log_echo "error" "$func" "Not support env type: [  ${envtype}   ],please check ."
+        return 1
+    fi
+    #### check files exists   ######
+    for eachFile in "${packageFile}"  "${sysconfigFile}"  "${execScripSftpFile}"  "${sftpconfigfile}";do
+        checkFileExists "${eachFile}" || return 1
+        if [ ! -s "${eachFile}" ];then
+            log_echo "error" "$func" "File:[  ${eachFile}  ] is null ,please check,"
+            return 1
+        fi
+    done
+    . ${sysconfigFile}
+    . ${sftpconfigfile}
+    
+    log_echo "info" "$func" "enter ${func} loop ..."
+    typeset beginTime=`date +%s`
+    while [ true ];do
+        #### download file ###
+        rm -f ${localserialFile}
+        downloadFileFromSftpServer "${sftpconfigfile}"  "${SERIAL_FILE_DIR}/${remoteserialFileName}"  "${localserialDir}"  "${execScripSftpFile}" || return 1
+        firstLineIP="`head -1  ${localserialFile} | awk '{print $1}'`"
+        firstStatus="`head -1  ${localserialFile} | awk '{print $2}'`"
+        if [ -z "${firstLineIP}" -o -z "${firstStatus}" ];then
+            log_echo "error" "${func}" "Data error, please check file:[  ${localserialFile}  ]"
+            return 1
+        fi
+        #### first status failed ###
+        if [ "${firstStatus}" = "${failedStatus}" ];then
+            log_echo "error" "${func}" "Failed ,because IP:[  ${firstLineIP}  ] failed."
+            return 1
+        fi
+        
+        if [ "${firstLineIP}" == "${localip}" -a "${firstStatus}" == "${unkownStatus}" ];then
+            upgradeApp "${packageFile}"  "${sysconfigFile}"  "${backupBaseDir}"   "${envtype}"  
+            if [ $? -ne 0 ];then
+                ### failed ###
+                sed -i 's/'"${firstLineIP}"'.*/'"${firstLineIP}"' '"${failedStatus}"'/'  "${localserialFile}"
+                if [ $? -ne 0 ];then
+                    log_echo "error" "${func}" "Command error, CMD=[  sed -i 's/'"${firstLineIP}"'.*/'"${firstLineIP}"' '"${failedStatus}"'/'  "${localserialFile}"  ] ."
+                    return 1
+                fi
+                return 1
+            else
+                ### successed ####
+                sed -i '/'"${firstLineIP}"'/d'  "${localserialFile}"
+                if [ $? -ne 0 ];then
+                    log_echo "error" "${func}" "Command error, CMD=[  sed -i '/'"${firstLineIP}"'.*/d'  "${localserialFile}"  ] ."
+                    return 1
+                fi            
+                echo "${firstLineIP} ${successedStatus}" >> ${localserialFile}
+            fi
+            ### 上传到远程sftp 服务器端 #######
+            uploadSerialFileToSftpServer "${sftpconfigfile}"  "${localserialFile}"  "${execScripSftpFile}"  || return 1
+            return 0
+        fi
+        sleep 10
+        typeset currentTime=`date +%s`
+        typeset expenseTime=`expr ${currentTime} - ${beginTime}`
+        if [ "${expenseTime}" -gt "${ExpireTime}" ];then
+            log_echo "error" "$func" "Expire time exec time:[ ${expenseTime} ]  more than :[ ${ExpireTime}  ]"
+            return 1
+        fi
+        log_echo "info" "$func" "Wait other machine run ..."
+    done
+    log_echo "info" "${func}" "Exit func ${func} with successed."
+    return 0  
+}
+
+###  获取系统挂载了的盘符  ###
+getSystemMountedPath()
+{
+    typeset func=getSystemMountedPath
+    #log_echo "info" "$func" "Enter $func with successed ."
+    typeset tmpFile=/tmp/$func.tmp
+    RETURN[0]=""
+    
+    df -Ph | grep -v "Filesystem" | awk '{print $NF}' > ${tmpFile}
+    while read eachLine;do
+        if [ -z "${RETURN[0]}" ];then
+            RETURN[0]="${eachLine}"
+        else
+            RETURN[0]="${RETURN[0]}   ${eachLine}"
+        fi
+    done < ${tmpFile}
+    if [ -z "${RETURN[0]}" ];then
+        log_echo "error" "$func"  "Get Mounted path failed ."
+        rm -f ${tmpFile}
+        return 1
+    fi
+    rm -f ${tmpFile}
+    log_echo "info" "$func" "Exit $func with successed."
+    return 0
+}
+
+###  获取系统配置信息存放到文件中 ####
+getSystemInfoToConfig()
+{
+    typeset func=getSystemInfoToConfig
+    if [ $# -ne 1 ];then
+        log_echo "error" "$func" "Parameter error ,usage: $func configfile"
+        log_echo "error" "$func" "You can use like this: $func ${SYSTEM_CONFIG_FILE}"
+        return 1
+    fi
+    log_echo "info" "$func" "Enter $func with successed ."
+    typeset sysconfigfile="$1"
+    typeset eachVar=""
+    typeset i=1
+    
+    > ${sysconfigfile}
+    getLocalIp || return 1
+    echo "localip=\"${RETURN[0]}\"" >>  ${sysconfigfile}
+    getSystemMountedPath || return 1
+    for eachVar in `echo "${RETURN[0]}"`;do
+        echo 'mountpath['"$i"']='"${eachVar}" >>  ${sysconfigfile}
+        i=`expr $i + 1 `
+    done
+    log_echo "info" "$func" "Exit $func with successed."
+    return 0
+}
+
+####  检查sftp 配置信息，测试下载对应的包能否正确下载，上传对应文件能否正常上传  ###########
+checkSftpConfig()
+{
+    typeset func=checkSftpConfig
+    ####  检查sftp 服务器配置信息是否正确  ##########
+    if [ $# -ne 4 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  sftpscript configFile packagename"
+        log_echo "error" "${func}" "You can use like: ${func}  ${SFTP_SCRIPT}  ${SFTP_CONFIG_FILE}  me.war"
+        return 1
+    fi
+    log_echo "info" "$func" "Enter $func with successed."
+    
+    typeset sftpscriptfile="$1"
+    typeset sftpconfigfile="$2"
+    typeset pakage="$3"
+    typeset getFileToDir="$4"
+    . ${sftpconfigfile}
+    if [ ! -s "${SYSTEM_CONFIG_FILE}" ];then
+        getSystemInfoToConfig "${SYSTEM_CONFIG_FILE}" || return 1
+    fi
+    . ${SYSTEM_CONFIG_FILE}
+    
+    #echo "11111111111 : ${localip}"
+    #echo "22222222222 : ${SFTP_HOST_IP}"
+    if [ `echo "${localip}" | grep -wc "${SFTP_HOST_IP}"` -eq 0 ];then
+        #### 1.测试sftp服务器上包是否存在，并且能下载   ###
+        ${sftpscriptfile}  "${SFTP_USER}"  "${SFTP_HOST_IP}"  "${SFTP_PASS}"   "${SFTP_FILE_DIR}/${pakage}"  "${getFileToDir}"  "getFile" >/dev/null 2>&1
+        if [ $? -ne 0 ];then
+            log_echo "error" "$func" "Download sftp server file : [  ${SFTP_FILE_DIR}/${pakage}   ] to local host  directory : [    ${getFileToDir}     ] failed. "
+            return 1
+        fi
+        
+        #### 2.测试上传到同步目录测试文件成功  ####
+        #echo "test upload file" > ${getFileToDir}/upload.txt
+        #${sftpscriptfile}  "${SFTP_USER}"  "${SFTP_HOST_IP}"  "${SFTP_PASS}"   "${SERIAL_FILE_DIR}"  "${getFileToDir}/upload.txt"  "putFile" >/dev/null 2>&1
+        #if [ $? -ne 0 ];then
+        #    log_echo "error" "$func" "Test put localhost file : [   ${getFileToDir}/upload.txt     ] to sftp server : [    ${SFTP_HOST_IP}    ]  failed. "
+        #    return 1
+        #fi
+    else
+        log_echo "info" "$func" "Sftp server is localhost ,so need not check ."
+        checkFileExists "${SFTP_FILE_DIR}/${pakage}" || return 1
+    fi
+    log_echo "info" "$func" "Exit $func with successed."
+    return 0
+}
+
+##########  上传同步文件到sftp 服务器  #######
+uploadSerialFileToSftpServer()
+{
+    typeset func=uploadSerialFileToSftpServer
+    if [ $# -ne 3 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  sftpconfigfile   localhostfile  execsftpfile"
+        return 1
+    fi 
+    log_echo "info" "$func" "Enter $func with successed."
+    typeset sftpconfigfile="$1"
+    typeset localhostfile="$2"
+    typeset execsftpfile="$3"
+    
+    checkFilesExists "$*" || return 1
+    . ${sftpconfigfile}
+    
+    ${execsftpfile}  "${SFTP_USER}"  "${SFTP_HOST_IP}"  "${SFTP_PASS}"  "${SERIAL_FILE_DIR}" "${localhostfile}" "putFile"
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Upload file : [  $localhostfile    ]   to : [  ${SFTP_HOST_IP}    ] remote-dir: [  ${SERIAL_FILE_DIR}   ]   with user : [  ${SFTP_USER}   ]. please check ."
+        return 1
+    fi
+    log_echo "info" "$func" "Exit $func with successed."
+    return 0   
+}
+
+##########  下载远程文件到本地   ###########
+downloadFileFromSftpServer()
+{
+    typeset func=downloadFileFromSftpServer
+    if [ $# -ne 4 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  sftpconfigfile   remotefile  localDir  execsftpfile"
+        return 1
+    fi 
+    log_echo "info" "$func" "Enter $func with successed."
+    typeset sftpconfigfile="$1"
+    typeset remotefile="$2"
+    typeset localDir="$3"
+    typeset execsftpfile="$4"
+    
+    checkFilesExists "${sftpconfigfile}"  "${execsftpfile}"  || return 1
+    . ${sftpconfigfile}
+    
+    ${execsftpfile}  "${SFTP_USER}"  "${SFTP_HOST_IP}"  "${SFTP_PASS}"   "${remotefile}"  "${localDir}"  "getFile" >/dev/null 2>&1
+    if [ $? -ne 0 ];then
+        log_echo "error" "$func" "Download sftp server file : [  ${remotefile}   ] to local host  directory : [    ${localDir}     ] failed. "
+        return 1
+    fi
+    log_echo "info" "$func" "Exit $func with successed."
+    return 0   
+}
+
+#######  得到对应用户的java 进程ID  ####
+getUserJavaProcessesId()
+{
+    typeset func=getUserJavaProcessesId
+    if [ $# -ne 1 ];then
+        log_echo "error" "${func}" "Parameter error usage : ${func}  username"
+        log_echo "error" "${func}" "Like: ${func}  demouser"
+        return 1
+    fi
+    #log_echo "info" "$func" "Enter $func with successed."
+    typeset theuser="$1"
+    typeset characternum=${#theuser}
+    typeset pids=""
+    RETURN[0]=""
+    if [ ${characternum} -gt 8 ];then
+        typeset uid=`grep "^${theuser}:"  /etc/passwd | awk -F':' '{print $3}'`
+        pids=`ps -ef | grep ^${uid} | grep java | awk '{print $2}'`
+    else
+        pids=`ps -ef | grep ^${theuser} | grep java | awk '{print $2}'`
+    fi
+    RETURN[0]="${pids}"
+    log_echo "info" "$func" "Exit $func with successed."
+    return 0  
+}

@@ -1,0 +1,94 @@
+#!/usr/bin/expect
+set timeout 100
+set sleeptime 0.2
+set username            [lindex $argv 0]        
+set hostIP              [lindex $argv 1]  
+set password            [lindex $argv 2]
+set port                [lindex $argv 3]
+set CmdFile             [lindex $argv 4]
+set ERR_TIMEOUT 3
+set ERR_OTHER 4
+set ERR_WRONGPASSWD 5
+set ERR_REFUSE 6
+
+###  command interact   ####
+spawn ssh ${username}@${hostIP} -p ${port}
+#spawn ssh ${hostIP} -p ${port}
+expect  {
+    "yes/no"
+    {
+        send "yes\r"
+        expect {
+            "password:" 
+            { 
+                send "$password\r"
+                expect {
+                    "Last login:"
+                    { 
+                        send "${CmdFile};exit\r"
+                    }
+                }
+            }
+        }
+    }
+    "password:" 
+    {
+        send "$password\r"
+        expect {
+            "Last login:"
+            { 
+                send "${CmdFile};exit\r"
+            }
+        }        
+    }
+    timeout {
+        exit $ERR_TIMEOUT
+    }
+    "failed"
+    {
+        exit $ERR_REFUSE
+    }
+    "Last login:"
+    {
+        send "${CmdFile};exit\r"
+    }
+    "Permission denied" 
+    { 
+        exit $ERR_WRONGPASSWD
+    }    
+    "No route to host"
+    {
+        exit $ERR_OTHER
+    }    
+    "Connection refused"
+    {
+        exit $ERR_OTHER
+    }      
+}
+
+
+sleep ${sleeptime}
+#expect  {
+#    "Permission denied" 
+#    { 
+#        exit $ERR_WRONGPASSWD
+#    }
+#    "Last login:"
+#    {
+#        send "${CmdFile};exit\r"
+#    }
+#    "No route to host"
+#    {
+#        exit $ERR_OTHER
+#    }
+#    "Connection refused"
+#    {
+#        exit $ERR_OTHER
+#    }    
+#    timeout {
+#        exit $ERR_TIMEOUT
+#    }
+#}
+
+#send "exit\r"
+expect eof
